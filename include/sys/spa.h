@@ -696,7 +696,7 @@ extern boolean_t spa_refcount_zero(spa_t *spa);
 
 /* Historical pool statistics */
 typedef struct spa_stats_history {
-	kmutex_t		lock;
+	kstat_lock_t	lock;
 	uint64_t		count;
 	uint64_t		size;
 	kstat_t			*kstat;

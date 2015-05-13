@@ -22,6 +22,7 @@
 #include <sys/zfs_context.h>
 #include <sys/dbuf.h>
 #include <sys/dmu_objset.h>
+#include <sys/kstat.h>
 
 /*
  * Calculate the index of the arc header for the state, disabled by default.
@@ -34,7 +35,7 @@ int zfs_dbuf_state_index = 0;
  * ==========================================================================
  */
 typedef struct dbuf_stats_t {
-	kmutex_t		lock;
+	kstat_lock_t		lock;
 	kstat_t			*kstat;
 	dbuf_hash_table_t	*hash;
 	int			idx;
@@ -170,7 +171,7 @@ dbuf_stats_hash_table_addr(kstat_t *ksp, loff_t n)
 {
 	dbuf_stats_t *dsh = ksp->ks_private;
 
-	ASSERT(MUTEX_HELD(&dsh->lock));
+	ASSERT(KSTAT_LOCK_HELD(&dsh->lock));
 
 	if (n <= dsh->hash->hash_table_mask) {
 		dsh->idx = n;
@@ -186,7 +187,7 @@ dbuf_stats_hash_table_init(dbuf_hash_table_t *hash)
 	dbuf_stats_t *dsh = &dbuf_stats_hash_table;
 	kstat_t *ksp;
 
-	mutex_init(&dsh->lock, NULL, MUTEX_DEFAULT, NULL);
+	kstat_lock_init(&dsh->lock);
 	dsh->hash = hash;
 
 	ksp = kstat_create("zfs", 0, "dbufs", "misc",
@@ -213,7 +214,7 @@ dbuf_stats_hash_table_destroy(void)
 	if (ksp)
 		kstat_delete(ksp);
 
-	mutex_destroy(&dsh->lock);
+	kstat_lock_destroy(&dsh->lock);
 }
 
 void

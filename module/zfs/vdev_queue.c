@@ -375,9 +375,9 @@ vdev_queue_io_add(vdev_queue_t *vq, zio_t *zio)
 	avl_add(&vq->vq_class[zio->io_priority].vqc_queued_tree, zio);
 
 	if (ssh->kstat != NULL) {
-		mutex_enter(&ssh->lock);
+		kstat_lock(&ssh->lock);
 		kstat_waitq_enter(ssh->kstat->ks_data);
-		mutex_exit(&ssh->lock);
+		kstat_unlock(&ssh->lock);
 	}
 }
 
@@ -391,9 +391,9 @@ vdev_queue_io_remove(vdev_queue_t *vq, zio_t *zio)
 	avl_remove(&vq->vq_class[zio->io_priority].vqc_queued_tree, zio);
 
 	if (ssh->kstat != NULL) {
-		mutex_enter(&ssh->lock);
+		kstat_lock(&ssh->lock);
 		kstat_waitq_exit(ssh->kstat->ks_data);
-		mutex_exit(&ssh->lock);
+		kstat_unlock(&ssh->lock);
 	}
 }
 
@@ -409,9 +409,9 @@ vdev_queue_pending_add(vdev_queue_t *vq, zio_t *zio)
 	avl_add(&vq->vq_active_tree, zio);
 
 	if (ssh->kstat != NULL) {
-		mutex_enter(&ssh->lock);
+		kstat_lock(&ssh->lock);
 		kstat_runq_enter(ssh->kstat->ks_data);
-		mutex_exit(&ssh->lock);
+		kstat_unlock(&ssh->lock);
 	}
 }
 
@@ -429,7 +429,7 @@ vdev_queue_pending_remove(vdev_queue_t *vq, zio_t *zio)
 	if (ssh->kstat != NULL) {
 		kstat_io_t *ksio = ssh->kstat->ks_data;
 
-		mutex_enter(&ssh->lock);
+		kstat_lock(&ssh->lock);
 		kstat_runq_exit(ksio);
 		if (zio->io_type == ZIO_TYPE_READ) {
 			ksio->reads++;
@@ -438,7 +438,7 @@ vdev_queue_pending_remove(vdev_queue_t *vq, zio_t *zio)
 			ksio->writes++;
 			ksio->nwritten += zio->io_size;
 		}
-		mutex_exit(&ssh->lock);
+		kstat_unlock(&ssh->lock);
 	}
 }
 

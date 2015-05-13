@@ -284,6 +284,25 @@ extern int mutex_tryenter(kmutex_t *mp);
 extern void *mutex_owner(kmutex_t *mp);
 extern int mutex_held(kmutex_t *mp);
 
+
+/*
+ * Spin lock
+ */
+
+typedef kmutex_t spinlock_t;
+typedef spinlock_t kstat_lock_t;
+
+#define spin_lock_init(l)    mutex_init(l,NULL, MUTEX_DEFAULT, NULL)
+#define spin_lock(l) mutex_enter(l)
+#define spin_unlock(l) mutex_exit(l)
+
+#define kstat_lock_init(l)    spin_lock_init(l)
+#define kstat_lock_destroy(l) do{}while(0)
+#define kstat_lock(l)         spin_lock(l)
+#define kstat_unlock(l)       spin_unlock(l)
+
+#define KSTAT_LOCK_HELD(l) MUTEX_HELD(l)
+
 /*
  * RW locks
  */
