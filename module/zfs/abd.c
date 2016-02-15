@@ -605,7 +605,7 @@ abd_raidz_gen_iterate(abd_t **cabds, abd_t *dabd,
 		 */
 		ASSERT((len & 511) == 0);
 
-		if (dabd)
+		if (dabd && (dsize > 0)) {
 			abd_miter_map_atomic(&daiter);
 
 		for (i = 0; i < level; i++) {
@@ -621,7 +621,7 @@ abd_raidz_gen_iterate(abd_t **cabds, abd_t *dabd,
 
 		csize -= len;
 
-		if (dabd) {
+		if (dabd && (dsize > 0)) {
 			abd_miter_unmap_atomic(&daiter);
 			dsize -= dlen;
 		}
@@ -662,7 +662,6 @@ abd_raidz_rec_iterate(abd_t **cabds, abd_t **tabds,
 		abd_miter_init_km(&xiters[i], tabds[i], ABD_MITER_W, 2*i+1);
 	}
 
-	/*  */
 	while (tsize > 0) {
 		len = tsize;
 		switch (level) {

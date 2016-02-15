@@ -79,17 +79,6 @@ typedef struct umem_cache {
 	int			cache_cflags;
 } umem_cache_t;
 
-static inline void *
-umem_alloc(size_t size, int flags)
-{
-	void *ptr = NULL;
-
-	do {
-		ptr = malloc(size);
-	} while (ptr == NULL && (flags & UMEM_NOFAIL));
-
-	return (ptr);
-}
 
 static inline void *
 umem_alloc_aligned(size_t size, size_t align, int flags)
@@ -110,6 +99,12 @@ umem_alloc_aligned(size_t size, size_t align, int flags)
 	}
 
 	return (ptr);
+}
+
+static inline void *
+umem_alloc(size_t size, int flags)
+{
+	return (umem_alloc_aligned(size, 32, flags));
 }
 
 static inline void *
