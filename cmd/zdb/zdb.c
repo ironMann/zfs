@@ -44,6 +44,7 @@
 #include <sys/sa_impl.h>
 #include <sys/vdev.h>
 #include <sys/vdev_impl.h>
+#include <sys/vdev_raidz.h>
 #include <sys/metaslab_impl.h>
 #include <sys/dmu_objset.h>
 #include <sys/dsl_dir.h>
