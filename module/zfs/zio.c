@@ -1765,7 +1765,8 @@ zio_read_gang(zio_t *pio, blkptr_t *bp, zio_gang_node_t *gn, abd_t *data,
 	if (gn != NULL)
 		return (pio);
 
-	return (zio_read(pio, pio->io_spa, bp, abd_get_offset(data, offset),
+	return (zio_read(pio, pio->io_spa, bp,
+		abd_get_offset(data, BP_GET_PSIZE(bp), offset),
 	    BP_GET_PSIZE(bp), zio_gang_issue_func_done,
 	    NULL, pio->io_priority, ZIO_GANG_CHILD_FLAGS(pio),
 	    &pio->io_bookmark));
@@ -1794,7 +1795,8 @@ zio_rewrite_gang(zio_t *pio, blkptr_t *bp, zio_gang_node_t *gn, abd_t *data,
 		 * this is just good hygiene.)
 		 */
 		if (gn != pio->io_gang_leader->io_gang_tree) {
-			abd_t *buf = abd_get_offset(data, offset);
+			abd_t *buf = abd_get_offset(data, BP_GET_PSIZE(bp),
+				offset);
 
 			zio_checksum_compute(zio, BP_GET_CHECKSUM(bp),
 			    buf, BP_GET_PSIZE(bp));
@@ -1809,9 +1811,10 @@ zio_rewrite_gang(zio_t *pio, blkptr_t *bp, zio_gang_node_t *gn, abd_t *data,
 			zio->io_pipeline &= ~ZIO_VDEV_IO_STAGES;
 	} else {
 		zio = zio_rewrite(pio, pio->io_spa, pio->io_txg, bp,
-		    abd_get_offset(data, offset), BP_GET_PSIZE(bp),
-		    zio_gang_issue_func_done, NULL, pio->io_priority,
-		    ZIO_GANG_CHILD_FLAGS(pio), &pio->io_bookmark);
+		    abd_get_offset(data, BP_GET_PSIZE(bp), offset),
+		    BP_GET_PSIZE(bp), zio_gang_issue_func_done, NULL,
+		    pio->io_priority, ZIO_GANG_CHILD_FLAGS(pio),
+		    &pio->io_bookmark);
 	}
 
 	return (zio);
@@ -2109,8 +2112,8 @@ zio_write_gang_block(zio_t *pio)
 		zp.zp_nopwrite = B_FALSE;
 
 		zio_nowait(zio_write(zio, spa, txg, &gbh->zg_blkptr[g],
-		    abd_get_offset(pio->io_data, pio->io_size - resid), lsize,
-		    &zp, zio_write_gang_member_ready, NULL,
+		    abd_get_offset(pio->io_data, lsize, pio->io_size - resid),
+		    lsize, &zp, zio_write_gang_member_ready, NULL,
 		    zio_write_gang_done, &gn->gn_child[g], pio->io_priority,
 		    ZIO_GANG_CHILD_FLAGS(pio), &pio->io_bookmark));
 	}
