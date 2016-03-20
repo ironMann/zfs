@@ -152,6 +152,7 @@ struct abd_miter {
 	int rw;			/* r/w access, whether to flush cache */
 #ifndef HAVE_1ARG_KMAP_ATOMIC
 	int km_type;		/* KM_USER0 or KM_USER1 */
+	unsigned long irq_flags; /* save irq if km_type > KM_USER1 */
 #endif
 };
 
@@ -184,6 +185,7 @@ abd_miter_init_km(struct abd_miter *aiter, abd_t *abd, int rw, int km)
 	aiter->rw = rw;
 #ifndef HAVE_1ARG_KMAP_ATOMIC
 	aiter->km_type = km;
+	aiter->irq_flags = 0;
 #endif
 }
 
@@ -223,14 +225,22 @@ abd_miter_map_x(struct abd_miter *aiter, int atomic)
 	} else {
 		ASSERT(aiter->length == aiter->sg->length - aiter->offset);
 
-		if (atomic)
+		if (atomic) {
+#if !defined(HAVE_1ARG_KMAP_ATOMIC)
+			if ((aiter->km_type > 1) &&
+				PageHighMem(sg_page(aiter->sg))) {
+				local_irq_save(aiter->irq_flags);
+			}
+#endif
 			paddr = zfs_kmap_atomic(sg_page(aiter->sg),
-			    (aiter->km_type == 0 ? KM_USER0 :
-			    (aiter->km_type == 1 ? KM_USER1 : KM_BIO_SRC_IRQ)));
-		else
+				KM_USER0 + aiter->km_type);
+		} else {
 			paddr = kmap(sg_page(aiter->sg));
+		}
+		ASSERT(paddr != NULL);
 	}
 	aiter->addr = paddr + aiter->offset;
+	VERIFY(aiter->addr);
 }
 
 /*
@@ -256,9 +266,14 @@ abd_miter_unmap_x(struct abd_miter *aiter, int atomic)
 		if (atomic) {
 			if (aiter->rw == ABD_MITER_W)
 				flush_kernel_dcache_page(sg_page(aiter->sg));
-			zfs_kunmap_atomic(paddr,
-			    (aiter->km_type == 0 ? KM_USER0 :
-			    (aiter->km_type == 1 ? KM_USER1 : KM_BIO_SRC_IRQ)));
+			zfs_kunmap_atomic(paddr, KM_USER0 + aiter->km_type);
+
+#if !defined(HAVE_1ARG_KMAP_ATOMIC)
+			if ((aiter->km_type > 1) &&
+				PageHighMem(sg_page(aiter->sg))) {
+				local_irq_restore(aiter->irq_flags);
+			}
+#endif
 		} else {
 			kunmap(sg_page(aiter->sg));
 		}
@@ -496,7 +511,6 @@ abd_iterate_func3(abd_t *abd0, abd_t *abd1, abd_t *abd2, size_t size,
 	size_t len;
 	int stop;
 	struct abd_miter aiter0, aiter1, aiter2;
-	unsigned long flags;
 
 	ABD_CHECK(abd0);
 	ABD_CHECK(abd1);
@@ -510,8 +524,6 @@ abd_iterate_func3(abd_t *abd0, abd_t *abd1, abd_t *abd2, size_t size,
 			&aiter1, abd1, ABD_MITER_W,
 			&aiter2, abd2, ABD_MITER_W);
 
-	/* We are using KM_BIO_SRC_IRQ so we need to disable irq */
-	local_irq_save(flags);
 	while (size > 0) {
 		len = MIN(aiter0.length, size);
 		len = MIN(aiter1.length, len);
@@ -539,7 +551,158 @@ abd_iterate_func3(abd_t *abd0, abd_t *abd1, abd_t *abd2, size_t size,
 		abd_miter_advance(&aiter1, len);
 		abd_miter_advance(&aiter2, len);
 	}
-	local_irq_restore(flags);
+}
+
+
+/*
+ * Iterate over code ABDs and one data ABD and call @func_raidz_gen.
+ * Length of cabds must be equal. dabd can be NULL (in this case dsize = 0)
+ * @func_raidz_gen should be implemented so that its behaviour
+ *                 is the same when taking linear and when taking scatter
+ */
+void
+abd_raidz_gen_iterate(abd_t **cabds, abd_t *dabd,
+	ssize_t csize, ssize_t dsize, const unsigned level,
+	void (*func_raidz_gen)(void **, const void *, size_t, size_t))
+{
+	int i;
+	ssize_t len, dlen;
+	struct abd_miter caiters[3];
+	struct abd_miter daiter;
+	void *caddrs[3];
+
+	ASSERT3U(level, <=, 3);
+
+	for (i = 0; i < level; i++) {
+		abd_miter_init_km(&caiters[i], cabds[i], ABD_MITER_W, i);
+	}
+	if (dabd)
+		abd_miter_init_km(&daiter, dabd, ABD_MITER_R, level);
+
+	while (csize > 0) {
+		len = csize;
+		switch (level) {
+			case 3:
+				len = MIN(caiters[2].length, len);
+			case 2:
+				len = MIN(caiters[1].length, len);
+			case 1:
+				len = MIN(caiters[0].length, len);
+		}
+
+		if (dabd && (dsize > 0)) {
+			len = MIN(daiter.length, len);
+			dlen = len;
+		} else {
+			dlen = 0;
+		}
+
+		/* must be progressive */
+		ASSERT3S(len, >, 0);
+		/*
+		 * The iterated function likely will not do well if each
+		 * segment except the last one is not multiple of 512 (raidz).
+		 */
+		ASSERT((len & 511) == 0);
+
+		if (dabd)
+			abd_miter_map_atomic(&daiter);
+
+		for (i = 0; i < level; i++) {
+			abd_miter_map_atomic(&caiters[i]);
+			caddrs[i] = caiters[i].addr;
+		}
+
+		func_raidz_gen(caddrs, daiter.addr, len, dlen);
+
+		for (i = level-1; i >= 0; i--) {
+			abd_miter_unmap_atomic(&caiters[i]);
+		}
+
+		csize -= len;
+
+		if (dabd) {
+			abd_miter_unmap_atomic(&daiter);
+			dsize -= dlen;
+		}
+
+		ASSERT3S(dsize, >=, 0);
+		ASSERT3S(csize, >=, 0);
+
+		if (dabd)
+			abd_miter_advance(&daiter, len);
+
+		for (i = 0; i < level; i++)
+			abd_miter_advance(&caiters[i], len);
+	}
+}
+
+/*
+ * Iterate over code ABDs and one data ABD and call @func_raidz_gen.
+ * @func_raidz_gen should be implemented so that its behaviour
+ *                 is the same when taking linear and when taking scatter
+ */
+void
+abd_raidz_rec_iterate(abd_t **cabds, abd_t **tabds,
+	ssize_t tsize, const unsigned level,
+	void (*func_raidz_rec)(void **t, const size_t tsize, void **c,
+	const unsigned *mul),
+	const unsigned *mul)
+{
+	int i;
+	ssize_t len;
+	struct abd_miter citers[3];
+	struct abd_miter xiters[3];
+	void *caddrs[3], *xaddrs[3];
+
+	ASSERT3U(level, <=, 3);
+
+	for (i = 0; i < level; i++) {
+		abd_miter_init_km(&citers[i], cabds[i], ABD_MITER_R, 2*i);
+		abd_miter_init_km(&xiters[i], tabds[i], ABD_MITER_W, 2*i+1);
+	}
+
+	/*  */
+	while (tsize > 0) {
+		len = tsize;
+		switch (level) {
+			case 3:
+				len = MIN(xiters[2].length, len);
+			case 2:
+				len = MIN(xiters[1].length, len);
+			case 1:
+				len = MIN(xiters[0].length, len);
+		}
+		/* must be progressive */
+		ASSERT3S(len, >, 0);
+		/*
+		 * The iterated function likely will not do well if each
+		 * segment except the last one is not multiple of 512 (raidz).
+		 */
+		ASSERT((len & 511) == 0);
+
+		for (i = 0; i < level; i++) {
+			abd_miter_map_atomic(&citers[i]);
+			abd_miter_map_atomic(&xiters[i]);
+			caddrs[i] = citers[i].addr;
+			xaddrs[i] = xiters[i].addr;
+		}
+
+		func_raidz_rec(xaddrs, len, caddrs, mul);
+
+		for (i = level-1; i >= 0; i--) {
+			abd_miter_unmap_atomic(&xiters[i]);
+			abd_miter_unmap_atomic(&citers[i]);
+		}
+
+		tsize -= len;
+		ASSERT3S(tsize, >=, 0);
+
+		for (i = 0; i < level; i++) {
+			abd_miter_advance(&xiters[i], len);
+			abd_miter_advance(&citers[i], len);
+		}
+	}
 }
 
 /*
