@@ -26,6 +26,7 @@ ZINJECT=${CMDDIR}/zinject/zinject
 ZPOOL=${CMDDIR}/zpool/zpool
 ZTEST=${CMDDIR}/ztest/ztest
 ZPIOS=${CMDDIR}/zpios/zpios
+RAIDZ_TEST=${CMDDIR}/raidz_test/raidz_test}
 
 COMMON_SH=${SCRIPTDIR}/common.sh
 ZFS_SH=${SCRIPTDIR}/zfs.sh
