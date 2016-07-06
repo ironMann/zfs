@@ -65,6 +65,10 @@ typedef struct fletcher_4_func {
 extern const fletcher_4_ops_t fletcher_4_avx2_ops;
 #endif
 
+#if defined(HAVE_AVX2) && defined(HAVE_AVX512F)
+extern const fletcher_4_ops_t fletcher_4_avx512f_ops;
+#endif
+
 #ifdef	__cplusplus
 }
 #endif
