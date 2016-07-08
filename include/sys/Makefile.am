@@ -29,6 +29,7 @@ COMMON_H = \
 	$(top_srcdir)/include/sys/dsl_pool.h \
 	$(top_srcdir)/include/sys/dsl_prop.h \
 	$(top_srcdir)/include/sys/dsl_scan.h \
+	$(top_srcdir)/include/sys/dsl_seqscrub.h \
 	$(top_srcdir)/include/sys/dsl_synctask.h \
 	$(top_srcdir)/include/sys/dsl_userhold.h \
 	$(top_srcdir)/include/sys/efi_partition.h \

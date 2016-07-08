@@ -56,6 +56,7 @@ KERNEL_C = \
 	dsl_pool.c \
 	dsl_prop.c \
 	dsl_scan.c \
+	dsl_seqscrub.c \
 	dsl_synctask.c \
 	dsl_destroy.c \
 	dsl_userhold.c \

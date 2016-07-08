@@ -35,6 +35,7 @@ $(MODULE)-objs += dsl_dir.o
 $(MODULE)-objs += dsl_pool.o
 $(MODULE)-objs += dsl_prop.o
 $(MODULE)-objs += dsl_scan.o
+$(MODULE)-objs += dsl_seqscrub.o
 $(MODULE)-objs += dsl_synctask.o
 $(MODULE)-objs += fm.o
 $(MODULE)-objs += gzip.o

@@ -211,6 +211,8 @@ static const struct {
 
 #include "vdev_raidz_math_impl.h"
 
+#pragma GCC diagnostic ignored "-Wframe-larger-than="
+
 DEFINE_GEN_METHODS(scalar);
 DEFINE_REC_METHODS(scalar);
 

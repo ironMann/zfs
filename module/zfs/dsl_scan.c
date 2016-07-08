@@ -29,6 +29,7 @@
 #include <sys/dsl_dataset.h>
 #include <sys/dsl_prop.h>
 #include <sys/dsl_dir.h>
+#include <sys/dsl_seqscrub.h>
 #include <sys/dsl_synctask.h>
 #include <sys/dnode.h>
 #include <sys/dmu_tx.h>
@@ -74,9 +75,8 @@ int dsl_scan_delay_completion = B_FALSE; /* set to delay scan completion */
 /* max number of blocks to free in a single TXG */
 ulong zfs_free_max_blocks = 100000;
 
-#define	DSL_SCAN_IS_SCRUB_RESILVER(scn) \
-	((scn)->scn_phys.scn_func == POOL_SCAN_SCRUB || \
-	(scn)->scn_phys.scn_func == POOL_SCAN_RESILVER)
+/* seq scrub/resilver */
+ulong zfs_seqscrub_elevator_size = 100000; /* ~16MB total size */
 
 /*
  * Enable/disable the processing of the free_bpobj object.
@@ -100,6 +100,11 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 
 	scn = dp->dp_scan = kmem_zalloc(sizeof (dsl_scan_t), KM_SLEEP);
 	scn->scn_dp = dp;
+
+	/* seq scrub/resilver */
+	avl_create(&scn->scn_scrub_elevator, dsl_seqscrub_compare,
+	    sizeof (dsl_seqscrub_entry_t),
+	    offsetof(dsl_seqscrub_entry_t, dse_node));
 
 	/*
 	 * It's possible that we're resuming a scan after a reboot so
@@ -170,7 +175,7 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 		}
 
 		if (err == ENOENT)
-			return (0);
+			return (0); // spa_scan_stat_init() ??
 		else if (err)
 			return (err);
 
@@ -197,6 +202,17 @@ dsl_scan_init(dsl_pool_t *dp, uint64_t txg)
 void
 dsl_scan_fini(dsl_pool_t *dp)
 {
+	/* seq scrub/resilver */
+	/* scan canceled? drain the elevator... */
+	dsl_seqscrub_entry_t *dse;
+	void *cookie = NULL;
+
+	while ((dse = avl_destroy_nodes(&dp->dp_scan->scn_scrub_elevator,
+	    &cookie)) != NULL)
+		kmem_free(dse, sizeof (dsl_seqscrub_entry_t));
+
+	avl_destroy(&dp->dp_scan->scn_scrub_elevator);
+
 	if (dp->dp_scan) {
 		kmem_free(dp->dp_scan, sizeof (dsl_scan_t));
 		dp->dp_scan = NULL;
@@ -263,6 +279,17 @@ dsl_scan_setup_sync(void *arg, dmu_tx_t *tx)
 		if (scn->scn_phys.scn_min_txg > TXG_INITIAL)
 			scn->scn_phys.scn_ddt_class_max = DDT_CLASS_DITTO;
 
+		/* seq scrub/resilver */
+		/* scan canceled? drain the elevator... */
+		{
+			dsl_seqscrub_entry_t *dse;
+			void *cookie = NULL;
+
+			while ((dse =
+			    avl_destroy_nodes(&dp->dp_scan->scn_scrub_elevator,
+			    &cookie)) != NULL)
+				kmem_free(dse, sizeof (dsl_seqscrub_entry_t));
+		}
 	}
 
 	/* back to the generic stuff */
@@ -340,6 +367,7 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		spa_history_log_internal(spa, "scan done", tx,
 		    "errors=%llu", spa_get_errlog_size(spa));
 
+#if 0
 	if (DSL_SCAN_IS_SCRUB_RESILVER(scn)) {
 		mutex_enter(&spa->spa_scrub_lock);
 		while (spa->spa_scrub_inflight > 0) {
@@ -370,7 +398,7 @@ dsl_scan_done(dsl_scan_t *scn, boolean_t complete, dmu_tx_t *tx)
 		 */
 		spa_async_request(spa, SPA_ASYNC_RESILVER_DONE);
 	}
-
+#endif
 	scn->scn_phys.scn_end_time = gethrestime_sec();
 
 	if (spa->spa_errata == ZPOOL_ERRATA_ZOL_2094_SCRUB)
@@ -477,6 +505,8 @@ dsl_scan_check_pause(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	 *    (default 30%), or someone is explicitly waiting for this txg
 	 *    to complete.
 	 *  or
+	 *  - scan is scrub/resilver and elevator is full
+	 *  or
 	 *  - the spa is shutting down because this pool is being exported
 	 *    or the machine is rebooting.
 	 */
@@ -488,6 +518,9 @@ dsl_scan_check_pause(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 	    (NSEC2MSEC(elapsed_nanosecs) > mintime &&
 	    (txg_sync_waiting(scn->scn_dp) ||
 	    dirty_pct >= zfs_vdev_async_write_active_min_dirty_percent)) ||
+	    (DSL_SCAN_IS_SCRUB_RESILVER(scn) &&
+	    avl_numnodes(&scn->scn_scrub_elevator) >=
+	    zfs_seqscrub_elevator_size) ||
 	    spa_shutting_down(scn->scn_dp->dp_spa)) {
 		if (zb) {
 			dprintf("pausing at bookmark %llx/%llx/%llx/%llx\n",
@@ -505,6 +538,7 @@ dsl_scan_check_pause(dsl_scan_t *scn, const zbookmark_phys_t *zb)
 		scn->scn_pausing = B_TRUE;
 		return (B_TRUE);
 	}
+
 	return (B_FALSE);
 }
 
@@ -1487,6 +1521,8 @@ dsl_scan_free_block_cb(void *arg, const blkptr_t *bp, dmu_tx_t *tx)
 	    -bp_get_dsize_sync(scn->scn_dp->dp_spa, bp),
 	    -BP_GET_PSIZE(bp), -BP_GET_UCSIZE(bp), tx);
 	scn->scn_visited_this_txg++;
+
+	/* seqscrub: rm (bp) from elevator? */
 	return (0);
 }
 
@@ -1507,15 +1543,24 @@ dsl_scan_active(dsl_scan_t *scn)
 	if (spa_version(scn->scn_dp->dp_spa) >= SPA_VERSION_DEADLISTS) {
 		(void) bpobj_space(&scn->scn_dp->dp_free_bpobj,
 		    &used, &comp, &uncomp);
+		if (used > 0)
+			return (B_TRUE);
 	}
-	return (used != 0);
+
+	/* seq scrub/resilver */
+	if (! DSL_SEQSCRUB_ELEVATOR_EMPTY(scn))
+		return (B_TRUE);
+
+	return (B_FALSE);
 }
+
 
 void
 dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 {
 	dsl_scan_t *scn = dp->dp_scan;
 	spa_t *spa = dp->dp_spa;
+	ulong scrubbed = 0;
 	int err = 0;
 
 	/*
@@ -1556,7 +1601,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	scn->scn_visited_this_txg = 0;
 	scn->scn_pausing = B_FALSE;
 	scn->scn_sync_start_time = gethrtime();
-	spa->spa_scrub_active = B_TRUE;
+	// spa->spa_scrub_active = B_TRUE;
 
 	/*
 	 * First process the async destroys.  If we pause, don't do
@@ -1672,6 +1717,19 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		ASSERT0(dsl_dir_phys(dp->dp_free_dir)->dd_uncompressed_bytes);
 	}
 
+	/* seq scrub/resilver */
+	scrubbed = dsl_seqscrub_process(scn);
+	mutex_enter(&spa->spa_scrub_lock);
+	while (spa->spa_scrub_inflight > 0) {
+		cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);
+	}
+	mutex_exit(&spa->spa_scrub_lock);
+
+	if (scn->scn_phys.scn_state != DSS_SCANNING &&
+	    spa->spa_scrub_active &&
+	    scrubbed == 0)
+		dsl_seqscrub_done(scn, tx);
+
 	if (scn->scn_phys.scn_state != DSS_SCANNING)
 		return;
 
@@ -1723,15 +1781,6 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 		scn->scn_done_txg = tx->tx_txg + 1;
 		zfs_dbgmsg("txg %llu traversal complete, waiting till txg %llu",
 		    tx->tx_txg, scn->scn_done_txg);
-	}
-
-	if (DSL_SCAN_IS_SCRUB_RESILVER(scn)) {
-		mutex_enter(&spa->spa_scrub_lock);
-		while (spa->spa_scrub_inflight > 0) {
-			cv_wait(&spa->spa_scrub_io_cv,
-			    &spa->spa_scrub_lock);
-		}
-		mutex_exit(&spa->spa_scrub_lock);
 	}
 
 	dsl_scan_sync_state(scn, tx);
@@ -1818,116 +1867,38 @@ count_block(zfs_all_blkstats_t *zab, const blkptr_t *bp)
 	}
 }
 
-static void
-dsl_scan_scrub_done(zio_t *zio)
-{
-	spa_t *spa = zio->io_spa;
-
-	zio_data_buf_free(zio->io_data, zio->io_size);
-
-	mutex_enter(&spa->spa_scrub_lock);
-	spa->spa_scrub_inflight--;
-	cv_broadcast(&spa->spa_scrub_io_cv);
-
-	if (zio->io_error && (zio->io_error != ECKSUM ||
-	    !(zio->io_flags & ZIO_FLAG_SPECULATIVE))) {
-		spa->spa_dsl_pool->dp_scan->scn_phys.scn_errors++;
-	}
-	mutex_exit(&spa->spa_scrub_lock);
-}
 
 static int
 dsl_scan_scrub_cb(dsl_pool_t *dp,
     const blkptr_t *bp, const zbookmark_phys_t *zb)
 {
 	dsl_scan_t *scn = dp->dp_scan;
-	size_t size = BP_GET_PSIZE(bp);
-	spa_t *spa = dp->dp_spa;
+	dsl_seqscrub_entry_t *dse;
+
 	uint64_t phys_birth = BP_PHYSICAL_BIRTH(bp);
-	boolean_t needs_io = B_FALSE;
-	int zio_flags = ZIO_FLAG_SCAN_THREAD | ZIO_FLAG_RAW | ZIO_FLAG_CANFAIL;
-	int scan_delay = 0;
-	int d;
 
 	if (phys_birth <= scn->scn_phys.scn_min_txg ||
 	    phys_birth >= scn->scn_phys.scn_max_txg)
 		return (0);
 
-	count_block(dp->dp_blkstats, bp);
-
 	if (BP_IS_EMBEDDED(bp))
 		return (0);
 
-	ASSERT(DSL_SCAN_IS_SCRUB_RESILVER(scn));
-	if (scn->scn_phys.scn_func == POOL_SCAN_SCRUB) {
-		zio_flags |= ZIO_FLAG_SCRUB;
-		needs_io = B_TRUE;
-		scan_delay = zfs_scrub_delay;
-	} else {
-		ASSERT3U(scn->scn_phys.scn_func, ==, POOL_SCAN_RESILVER);
-		zio_flags |= ZIO_FLAG_RESILVER;
-		needs_io = B_FALSE;
-		scan_delay = zfs_resilver_delay;
+	/* seq scrub/resilver */
+	dse = kmem_zalloc(sizeof (dsl_seqscrub_entry_t), KM_SLEEP);
+	dse->dse_bp = *bp;
+	dse->dse_zb = *zb;
+
+	if (avl_find(&scn->scn_scrub_elevator, dse, NULL) != NULL) {
+		/* should this happen? bad comparison fun? */
+		kmem_free(dse, sizeof (dsl_seqscrub_entry_t));
+		return (0);
 	}
 
-	/* If it's an intent log block, failure is expected. */
-	if (zb->zb_level == ZB_ZIL_LEVEL)
-		zio_flags |= ZIO_FLAG_SPECULATIVE;
+	count_block(dp->dp_blkstats, bp);
 
-	for (d = 0; d < BP_GET_NDVAS(bp); d++) {
-		vdev_t *vd = vdev_lookup_top(spa,
-		    DVA_GET_VDEV(&bp->blk_dva[d]));
+	avl_add(&scn->scn_scrub_elevator, dse);
 
-		/*
-		 * Keep track of how much data we've examined so that
-		 * zpool(1M) status can make useful progress reports.
-		 */
-		scn->scn_phys.scn_examined += DVA_GET_ASIZE(&bp->blk_dva[d]);
-		spa->spa_scan_pass_exam += DVA_GET_ASIZE(&bp->blk_dva[d]);
-
-		/* if it's a resilver, this may not be in the target range */
-		if (!needs_io) {
-			if (DVA_GET_GANG(&bp->blk_dva[d])) {
-				/*
-				 * Gang members may be spread across multiple
-				 * vdevs, so the best estimate we have is the
-				 * scrub range, which has already been checked.
-				 * XXX -- it would be better to change our
-				 * allocation policy to ensure that all
-				 * gang members reside on the same vdev.
-				 */
-				needs_io = B_TRUE;
-			} else {
-				needs_io = vdev_dtl_contains(vd, DTL_PARTIAL,
-				    phys_birth, 1);
-			}
-		}
-	}
-
-	if (needs_io && !zfs_no_scrub_io) {
-		vdev_t *rvd = spa->spa_root_vdev;
-		uint64_t maxinflight = rvd->vdev_children * zfs_top_maxinflight;
-		void *data = zio_data_buf_alloc(size);
-
-		mutex_enter(&spa->spa_scrub_lock);
-		while (spa->spa_scrub_inflight >= maxinflight)
-			cv_wait(&spa->spa_scrub_io_cv, &spa->spa_scrub_lock);
-		spa->spa_scrub_inflight++;
-		mutex_exit(&spa->spa_scrub_lock);
-
-		/*
-		 * If we're seeing recent (zfs_scan_idle) "important" I/Os
-		 * then throttle our workload to limit the impact of a scan.
-		 */
-		if (ddi_get_lbolt64() - spa->spa_last_io <= zfs_scan_idle)
-			delay(scan_delay);
-
-		zio_nowait(zio_read(NULL, spa, bp, data, size,
-		    dsl_scan_scrub_done, NULL, ZIO_PRIORITY_SCRUB,
-		    zio_flags, zb));
-	}
-
-	/* do not relocate this block */
 	return (0);
 }
 
@@ -1993,4 +1964,9 @@ MODULE_PARM_DESC(zfs_free_max_blocks, "Max number of blocks freed in one txg");
 
 module_param(zfs_free_bpobj_enabled, int, 0644);
 MODULE_PARM_DESC(zfs_free_bpobj_enabled, "Enable processing of the free_bpobj");
+
+/* seq scrub/resilver */
+module_param(zfs_seqscrub_elevator_size, ulong, 0644);
+MODULE_PARM_DESC(zfs_seqscrub_elevator_size, "Max size of scrub elevator");
+
 #endif

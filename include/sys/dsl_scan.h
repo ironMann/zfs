@@ -121,8 +121,15 @@ typedef struct dsl_scan {
 	/* for debugging / information */
 	uint64_t scn_visited_this_txg;
 
+	/* seq scrub/resilver */
+	avl_tree_t scn_scrub_elevator;
+
 	dsl_scan_phys_t scn_phys;
 } dsl_scan_t;
+
+#define	DSL_SCAN_IS_SCRUB_RESILVER(scn) \
+	((scn)->scn_phys.scn_func == POOL_SCAN_SCRUB || \
+	(scn)->scn_phys.scn_func == POOL_SCAN_RESILVER)
 
 int dsl_scan_init(struct dsl_pool *dp, uint64_t txg);
 void dsl_scan_fini(struct dsl_pool *dp);
