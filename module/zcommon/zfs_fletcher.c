@@ -285,7 +285,7 @@ int
 fletcher_4_impl_set(const char *val)
 {
 	const fletcher_4_ops_t *ops;
-	enum fletcher_selector idx;
+	enum fletcher_selector idx = FLETCHER_FASTEST;
 	size_t val_len;
 	unsigned i;
 
@@ -389,18 +389,22 @@ fletcher_4_incremental_byteswap(const void *buf, uint64_t size,
 void
 fletcher_4_init(void)
 {
-	const uint64_t const bench_ns = (50 * MICROSEC); /* 50ms */
-	unsigned long best_run_count = 0;
+	static const uint64_t bench_ns = MSEC2NSEC(50);		    /* 50ms */
+	static const size_t data_size = 1 << SPA_OLD_MAXBLOCKSHIFT; /* 128kiB */
+	uint64_t best_run = 0;
 	unsigned long best_run_index = 0;
-	const unsigned data_size = 4096;
 	char *databuf;
-	int i;
+	int i, l;
 
-	databuf = kmem_alloc(data_size, KM_SLEEP);
+	databuf = vmem_alloc(data_size, KM_SLEEP);
+	/* warm-up */
+	for (i = 0; i < data_size / sizeof (uint64_t); i++)
+		((uint64_t *)databuf)[i] = (uintptr_t)(databuf+i);
+
 	for (i = 0; i < ARRAY_SIZE(fletcher_4_algos); i++) {
 		const fletcher_4_ops_t *ops = fletcher_4_algos[i];
 		kstat_named_t *stat = &fletcher_4_kstat_data[i];
-		unsigned long run_count = 0;
+		uint64_t run_count = 0, run_bw, run_time_ns;
 		hrtime_t start;
 		zio_cksum_t zc;
 
@@ -413,30 +417,33 @@ fletcher_4_init(void)
 
 		kpreempt_disable();
 		start = gethrtime();
-		ops->init(&zc);
 		do {
-			ops->compute(databuf, data_size, &zc);
-			run_count++;
-		} while (gethrtime() < start + bench_ns);
-		if (ops->fini != NULL)
-			ops->fini(&zc);
+			/*
+			 * Repeating benchmark 32 times offsets the overhead
+			 * of calling gethrtime() in each turn.
+			 */
+			for (l = 0; l < 32; l++) {
+				ops->init(&zc);
+				ops->compute(databuf, data_size, &zc);
+				if (ops->fini != NULL)
+					ops->fini(&zc);
+				run_count++;
+			}
+			run_time_ns = gethrtime() - start;
+		} while (run_time_ns < bench_ns);
 		kpreempt_enable();
 
-		if (run_count > best_run_count) {
-			best_run_count = run_count;
+		run_bw = (data_size >> 10) * run_count * (NANOSEC >> 10);
+		run_bw /= run_time_ns;	/* MB/s */
+
+		stat->value.ui64 = run_bw;
+
+		if (run_bw > best_run) {
+			best_run = run_bw;
 			best_run_index = i;
 		}
-
-		/*
-		 * Due to high overhead of gethrtime(), the performance data
-		 * here is inaccurate and much slower than it could be.
-		 * It's fine for our use though because only relative speed
-		 * is important.
-		 */
-		stat->value.ui64 = data_size * run_count *
-		    (NANOSEC / bench_ns) >> 20; /* by MB/s */
 	}
-	kmem_free(databuf, data_size);
+	vmem_free(databuf, data_size);
 
 	fletcher_4_impl_selectors[FLETCHER_FASTEST].fis_ops =
 	    fletcher_4_algos[best_run_index];
