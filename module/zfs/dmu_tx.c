@@ -1258,7 +1258,7 @@ dmu_tx_unassign(dmu_tx_t *tx)
 		mutex_enter(&dn->dn_mtx);
 		ASSERT3U(dn->dn_assigned_txg, ==, tx->tx_txg);
 
-		if (refcount_remove(&dn->dn_tx_holds, tx) == 0) {
+		if (refcount_remove_nv(&dn->dn_tx_holds, tx) == 0) {
 			dn->dn_assigned_txg = 0;
 			cv_broadcast(&dn->dn_notxholds);
 		}
@@ -1394,9 +1394,9 @@ dmu_tx_willuse_space(dmu_tx_t *tx, int64_t delta)
 	if (delta > 0) {
 		ASSERT3U(refcount_count(&tx->tx_space_written) + delta, <=,
 		    tx->tx_space_towrite);
-		(void) refcount_add_many(&tx->tx_space_written, delta, NULL);
+		refcount_add_many(&tx->tx_space_written, delta, NULL);
 	} else {
-		(void) refcount_add_many(&tx->tx_space_freed, -delta, NULL);
+		refcount_add_many(&tx->tx_space_freed, -delta, NULL);
 	}
 #endif
 }
@@ -1422,7 +1422,7 @@ dmu_tx_commit(dmu_tx_t *tx)
 		mutex_enter(&dn->dn_mtx);
 		ASSERT3U(dn->dn_assigned_txg, ==, tx->tx_txg);
 
-		if (refcount_remove(&dn->dn_tx_holds, tx) == 0) {
+		if (refcount_remove_nv(&dn->dn_tx_holds, tx) == 0) {
 			dn->dn_assigned_txg = 0;
 			cv_broadcast(&dn->dn_notxholds);
 		}

@@ -1312,7 +1312,7 @@ sa_idx_tab_rele(objset_t *os, void *arg)
 		return;
 
 	mutex_enter(&sa->sa_lock);
-	if (refcount_remove(&idx_tab->sa_refcount, NULL) == 0) {
+	if (refcount_remove_nv(&idx_tab->sa_refcount, NULL) == 0) {
 		list_remove(&idx_tab->sa_layout->lot_idx_tab, idx_tab);
 		if (idx_tab->sa_variable_lengths)
 			kmem_free(idx_tab->sa_variable_lengths,

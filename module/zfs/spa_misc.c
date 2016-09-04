@@ -400,7 +400,7 @@ spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw)
 			}
 			scl->scl_writer = curthread;
 		}
-		(void) refcount_add(&scl->scl_count, tag);
+		refcount_add(&scl->scl_count, tag);
 		mutex_exit(&scl->scl_lock);
 	}
 	return (1);
@@ -434,7 +434,7 @@ spa_config_enter(spa_t *spa, int locks, void *tag, krw_t rw)
 			}
 			scl->scl_writer = curthread;
 		}
-		(void) refcount_add(&scl->scl_count, tag);
+		refcount_add(&scl->scl_count, tag);
 		mutex_exit(&scl->scl_lock);
 	}
 	ASSERT(wlocks_held <= locks);
@@ -451,7 +451,7 @@ spa_config_exit(spa_t *spa, int locks, void *tag)
 			continue;
 		mutex_enter(&scl->scl_lock);
 		ASSERT(!refcount_is_zero(&scl->scl_count));
-		if (refcount_remove(&scl->scl_count, tag) == 0) {
+		if (refcount_remove_nv(&scl->scl_count, tag) == 0) {
 			ASSERT(scl->scl_writer == NULL ||
 			    scl->scl_writer == curthread);
 			scl->scl_writer = NULL;	/* OK in either case */
@@ -737,7 +737,7 @@ spa_open_ref(spa_t *spa, void *tag)
 {
 	ASSERT(refcount_count(&spa->spa_refcount) >= spa->spa_minref ||
 	    MUTEX_HELD(&spa_namespace_lock));
-	(void) refcount_add(&spa->spa_refcount, tag);
+	refcount_add(&spa->spa_refcount, tag);
 }
 
 /*
@@ -749,7 +749,7 @@ spa_close(spa_t *spa, void *tag)
 {
 	ASSERT(refcount_count(&spa->spa_refcount) > spa->spa_minref ||
 	    MUTEX_HELD(&spa_namespace_lock));
-	(void) refcount_remove(&spa->spa_refcount, tag);
+	refcount_remove(&spa->spa_refcount, tag);
 }
 
 /*
@@ -763,7 +763,7 @@ spa_close(spa_t *spa, void *tag)
 void
 spa_async_close(spa_t *spa, void *tag)
 {
-	(void) refcount_remove(&spa->spa_refcount, tag);
+	refcount_remove(&spa->spa_refcount, tag);
 }
 
 /*

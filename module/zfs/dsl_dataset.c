@@ -645,13 +645,13 @@ void
 dsl_dataset_long_hold(dsl_dataset_t *ds, void *tag)
 {
 	ASSERT(dsl_pool_config_held(ds->ds_dir->dd_pool));
-	(void) refcount_add(&ds->ds_longholds, tag);
+	refcount_add(&ds->ds_longholds, tag);
 }
 
 void
 dsl_dataset_long_rele(dsl_dataset_t *ds, void *tag)
 {
-	(void) refcount_remove(&ds->ds_longholds, tag);
+	refcount_remove(&ds->ds_longholds, tag);
 }
 
 /* Return B_TRUE if there are any long holds on this dataset. */

@@ -115,7 +115,7 @@ refcount_count(refcount_t *rc)
 }
 
 int64_t
-refcount_add_many(refcount_t *rc, uint64_t number, void *holder)
+refcount_add_many_nv(refcount_t *rc, uint64_t number, void *holder)
 {
 	reference_t *ref = NULL;
 	int64_t count;
@@ -136,14 +136,26 @@ refcount_add_many(refcount_t *rc, uint64_t number, void *holder)
 	return (count);
 }
 
-int64_t
-refcount_add(refcount_t *rc, void *holder)
+void
+refcount_add_many(refcount_t *rc, uint64_t number, void *holder)
 {
-	return (refcount_add_many(rc, 1, holder));
+	(void) refcount_add_many_nv(rc, number, holder);
 }
 
 int64_t
-refcount_remove_many(refcount_t *rc, uint64_t number, void *holder)
+refcount_add_nv(refcount_t *rc, void *holder)
+{
+	return (refcount_add_many_nv(rc, 1, holder));
+}
+
+void
+refcount_add(refcount_t *rc, void *holder)
+{
+	refcount_add_many(rc, 1, holder);
+}
+
+int64_t
+refcount_remove_many_nv(refcount_t *rc, uint64_t number, void *holder)
 {
 	reference_t *ref;
 	int64_t count;
@@ -190,10 +202,22 @@ refcount_remove_many(refcount_t *rc, uint64_t number, void *holder)
 	return (-1);
 }
 
+void
+refcount_remove_many(refcount_t *rc, uint64_t number, void *holder)
+{
+	(void) refcount_remove_many_nv(rc, number, holder);
+}
+
 int64_t
+refcount_remove_nv(refcount_t *rc, void *holder)
+{
+	return (refcount_remove_many_nv(rc, 1, holder));
+}
+
+void
 refcount_remove(refcount_t *rc, void *holder)
 {
-	return (refcount_remove_many(rc, 1, holder));
+	refcount_remove_many(rc, 1, holder);
 }
 
 void

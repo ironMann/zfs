@@ -65,12 +65,15 @@ void refcount_destroy(refcount_t *rc);
 void refcount_destroy_many(refcount_t *rc, uint64_t number);
 int refcount_is_zero(refcount_t *rc);
 int64_t refcount_count(refcount_t *rc);
-int64_t refcount_add(refcount_t *rc, void *holder_tag);
-int64_t refcount_remove(refcount_t *rc, void *holder_tag);
-int64_t refcount_add_many(refcount_t *rc, uint64_t number, void *holder_tag);
-int64_t refcount_remove_many(refcount_t *rc, uint64_t number, void *holder_tag);
+void refcount_add(refcount_t *rc, void *holder_tag);
+int64_t refcount_add_nv(refcount_t *rc, void *holder_tag);
+void refcount_remove(refcount_t *rc, void *holder_tag);
+int64_t refcount_remove_nv(refcount_t *rc, void *holder_tag);
+void refcount_add_many(refcount_t *rc, uint64_t number, void *holder_tag);
+int64_t refcount_add_many_nv(refcount_t *rc, uint64_t number, void *holder_tag);
+void refcount_remove_many(refcount_t *rc, uint64_t number, void *holder_tag);
+int64_t refcount_remove_many_nv(refcount_t *rc, uint64_t number, void *holder_tag);
 void refcount_transfer(refcount_t *dst, refcount_t *src);
-
 void refcount_init(void);
 void refcount_fini(void);
 
@@ -86,17 +89,26 @@ typedef struct refcount {
 #define	refcount_destroy_many(rc, number) ((rc)->rc_count = 0)
 #define	refcount_is_zero(rc) ((rc)->rc_count == 0)
 #define	refcount_count(rc) ((rc)->rc_count)
-#define	refcount_add(rc, holder) atomic_inc_64_nv(&(rc)->rc_count)
-#define	refcount_remove(rc, holder) atomic_dec_64_nv(&(rc)->rc_count)
+#define	refcount_add(rc, holder) atomic_inc_64(&(rc)->rc_count)
+#define	refcount_add_nv(rc, holder) atomic_inc_64_nv(&(rc)->rc_count)
+#define	refcount_remove(rc, holder) atomic_dec_64(&(rc)->rc_count)
+#define	refcount_remove_nv(rc, holder) atomic_dec_64_nv(&(rc)->rc_count)
 #define	refcount_add_many(rc, number, holder) \
+	atomic_add_64(&(rc)->rc_count, number)
+#define	refcount_add_many_nv(rc, number, holder) \
 	atomic_add_64_nv(&(rc)->rc_count, number)
 #define	refcount_remove_many(rc, number, holder) \
-	atomic_add_64_nv(&(rc)->rc_count, -number)
-#define	refcount_transfer(dst, src) { \
-	uint64_t __tmp = (src)->rc_count; \
-	atomic_add_64(&(src)->rc_count, -__tmp); \
-	atomic_add_64(&(dst)->rc_count, __tmp); \
-}
+	atomic_sub_64(&(rc)->rc_count, number)
+#define	refcount_remove_many_nv(rc, number, holder) \
+	atomic_sub_64_nv(&(rc)->rc_count, number)
+#define	refcount_transfer(dst, src) 					\
+do {									\
+	uint64_t __src = *(volatile uint64_t *)&((src)->rc_count);	\
+	if (__src == atomic_cas_64(&(src)->rc_count, __src, 0)) { 	\
+		atomic_add_64(&(dst)->rc_count, __src);			\
+		break;							\
+	}								\
+} while(B_TRUE)
 
 #define	refcount_init()
 #define	refcount_fini()

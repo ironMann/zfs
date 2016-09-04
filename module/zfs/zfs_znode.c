@@ -295,7 +295,7 @@ zfs_znode_hold_exit(zfs_sb_t *zsb, znode_hold_t *zh)
 	mutex_exit(&zh->zh_lock);
 
 	mutex_enter(&zsb->z_hold_locks[i]);
-	if (refcount_remove(&zh->zh_refcount, NULL) == 0) {
+	if (refcount_remove_nv(&zh->zh_refcount, NULL) == 0) {
 		avl_remove(&zsb->z_hold_trees[i], zh);
 		remove = B_TRUE;
 	}

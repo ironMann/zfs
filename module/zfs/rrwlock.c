@@ -183,9 +183,9 @@ rrw_enter_read_impl(rrwlock_t *rrl, boolean_t prio, void *tag)
 	if (rrl->rr_writer_wanted || rrl->rr_track_all) {
 		/* may or may not be a re-entrant enter */
 		rrn_add(rrl, tag);
-		(void) refcount_add(&rrl->rr_linked_rcount, tag);
+		refcount_add(&rrl->rr_linked_rcount, tag);
 	} else {
-		(void) refcount_add(&rrl->rr_anon_rcount, tag);
+		refcount_add(&rrl->rr_anon_rcount, tag);
 	}
 	ASSERT(rrl->rr_writer == NULL);
 	mutex_exit(&rrl->rr_lock);
@@ -257,10 +257,10 @@ rrw_exit(rrwlock_t *rrl, void *tag)
 	if (rrl->rr_writer == NULL) {
 		int64_t count;
 		if (rrn_find_and_remove(rrl, tag)) {
-			count = refcount_remove(&rrl->rr_linked_rcount, tag);
+			count = refcount_remove_nv(&rrl->rr_linked_rcount, tag);
 		} else {
 			ASSERT(!rrl->rr_track_all);
-			count = refcount_remove(&rrl->rr_anon_rcount, tag);
+			count = refcount_remove_nv(&rrl->rr_anon_rcount, tag);
 		}
 		if (count == 0)
 			cv_broadcast(&rrl->rr_cv);

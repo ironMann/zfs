@@ -1636,7 +1636,7 @@ dbuf_undirty(dmu_buf_impl_t *db, dmu_tx_t *tx)
 	ASSERT(db->db_dirtycnt > 0);
 	db->db_dirtycnt -= 1;
 
-	if (refcount_remove(&db->db_holds, (void *)(uintptr_t)txg) == 0) {
+	if (refcount_remove_nv(&db->db_holds, (void *)(uintptr_t)txg) == 0) {
 		arc_buf_t *buf = db->db_buf;
 
 		ASSERT(db->db_state == DB_NOFILL || arc_released(buf));
@@ -2101,7 +2101,7 @@ dbuf_create(dnode_t *dn, uint8_t level, uint64_t blkid,
 
 	ASSERT(dn->dn_object == DMU_META_DNODE_OBJECT ||
 	    refcount_count(&dn->dn_holds) > 0);
-	(void) refcount_add(&dn->dn_holds, db);
+	refcount_add(&dn->dn_holds, db);
 	atomic_inc_32(&dn->dn_dbufs_count);
 
 	dprintf_dbuf(db, "db=%p\n", db);
@@ -2470,7 +2470,7 @@ top:
 		}
 	}
 
-	(void) refcount_add(&dh->dh_db->db_holds, dh->dh_tag);
+	refcount_add(&dh->dh_db->db_holds, dh->dh_tag);
 	DBUF_VERIFY(dh->dh_db);
 	mutex_exit(&dh->dh_db->db_mtx);
 
@@ -2595,7 +2595,7 @@ dbuf_rm_spill(dnode_t *dn, dmu_tx_t *tx)
 void
 dbuf_add_ref(dmu_buf_impl_t *db, void *tag)
 {
-	VERIFY(refcount_add(&db->db_holds, tag) > 1);
+	VERIFY(refcount_add_nv(&db->db_holds, tag) > 1);
 }
 
 #pragma weak dmu_buf_try_add_ref = dbuf_try_add_ref
@@ -2614,7 +2614,7 @@ dbuf_try_add_ref(dmu_buf_t *db_fake, objset_t *os, uint64_t obj, uint64_t blkid,
 
 	if (found_db != NULL) {
 		if (db == found_db && dbuf_refcount(db) > db->db_dirtycnt) {
-			(void) refcount_add(&db->db_holds, tag);
+			refcount_add(&db->db_holds, tag);
 			result = B_TRUE;
 		}
 		mutex_exit(&found_db->db_mtx);
@@ -2659,7 +2659,7 @@ dbuf_rele_and_unlock(dmu_buf_impl_t *db, void *tag)
 	 * dnode so we can guarantee in dnode_move() that a referenced bonus
 	 * buffer has a corresponding dnode hold.
 	 */
-	holds = refcount_remove(&db->db_holds, tag);
+	holds = refcount_remove_nv(&db->db_holds, tag);
 	ASSERT(holds >= 0);
 
 	/*

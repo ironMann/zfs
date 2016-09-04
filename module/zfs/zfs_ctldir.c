@@ -184,7 +184,7 @@ zfsctl_snapshot_hold(zfs_snapentry_t *se)
 static void
 zfsctl_snapshot_rele(zfs_snapentry_t *se)
 {
-	if (refcount_remove(&se->se_refcount, NULL) == 0)
+	if (refcount_remove_nv(&se->se_refcount, NULL) == 0)
 		zfsctl_snapshot_free(se);
 }
 

@@ -1225,7 +1225,7 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 		if ((flag & DNODE_MUST_BE_FREE) && type != DMU_OT_NONE)
 			return (SET_ERROR(EEXIST));
 		DNODE_VERIFY(dn);
-		(void) refcount_add(&dn->dn_holds, tag);
+		refcount_add(&dn->dn_holds, tag);
 		*dnp = dn;
 		return (0);
 	}
@@ -1313,7 +1313,7 @@ dnode_hold_impl(objset_t *os, uint64_t object, int flag, int slots,
 		dbuf_rele(db, FTAG);
 		return (type == DMU_OT_NONE ? ENOENT : EEXIST);
 	}
-	if (refcount_add(&dn->dn_holds, tag) == 1)
+	if (refcount_add_nv(&dn->dn_holds, tag) == 1)
 		dbuf_add_ref(db, dnh);
 	mutex_exit(&dn->dn_mtx);
 
@@ -1352,7 +1352,7 @@ dnode_add_ref(dnode_t *dn, void *tag)
 		mutex_exit(&dn->dn_mtx);
 		return (FALSE);
 	}
-	VERIFY(1 < refcount_add(&dn->dn_holds, tag));
+	VERIFY3U(1, <, refcount_add_nv(&dn->dn_holds, tag));
 	mutex_exit(&dn->dn_mtx);
 	return (TRUE);
 }
@@ -1372,7 +1372,7 @@ dnode_rele_and_unlock(dnode_t *dn, void *tag)
 	dmu_buf_impl_t *db = dn->dn_dbuf;
 	dnode_handle_t *dnh = dn->dn_handle;
 
-	refs = refcount_remove(&dn->dn_holds, tag);
+	refs = refcount_remove_nv(&dn->dn_holds, tag);
 	mutex_exit(&dn->dn_mtx);
 
 	/*

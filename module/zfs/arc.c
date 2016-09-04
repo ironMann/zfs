@@ -604,8 +604,11 @@ static arc_stats_t arc_stats = {
 #define	ARCSTAT_INCR(stat, val) \
 	atomic_add_64(&arc_stats.stat.value.ui64, (val))
 
+#define	ARCSTAT_DECR(stat, val) \
+	atomic_sub_64(&arc_stats.stat.value.ui64, (val))
+
 #define	ARCSTAT_BUMP(stat)	ARCSTAT_INCR(stat, 1)
-#define	ARCSTAT_BUMPDOWN(stat)	ARCSTAT_INCR(stat, -1)
+#define	ARCSTAT_BUMPDOWN(stat)	ARCSTAT_DECR(stat, 1)
 
 #define	ARCSTAT_MAX(stat, val) {					\
 	uint64_t m;							\
@@ -1245,11 +1248,9 @@ arc_hdr_realloc(arc_buf_hdr_t *hdr, kmem_cache_t *old, kmem_cache_t *new)
 	 * the wrong pointer address when calling arc_hdr_destroy() later.
 	 */
 
-	(void) refcount_remove_many(&dev->l2ad_alloc,
-	    hdr->b_l2hdr.b_asize, hdr);
+	refcount_remove_many(&dev->l2ad_alloc, hdr->b_l2hdr.b_asize, hdr);
 
-	(void) refcount_add_many(&dev->l2ad_alloc,
-	    nhdr->b_l2hdr.b_asize, nhdr);
+	refcount_add_many(&dev->l2ad_alloc, nhdr->b_l2hdr.b_asize, nhdr);
 
 	buf_discard_identity(hdr);
 	hdr->b_freeze_cksum = NULL;
@@ -1418,7 +1419,7 @@ add_reference(arc_buf_hdr_t *hdr, kmutex_t *hash_lock, void *tag)
 
 	state = hdr->b_l1hdr.b_state;
 
-	if ((refcount_add(&hdr->b_l1hdr.b_refcnt, tag) == 1) &&
+	if ((refcount_add_nv(&hdr->b_l1hdr.b_refcnt, tag) == 1) &&
 	    (state != arc_anon)) {
 		/* We don't use the L2-only state list. */
 		if (state != arc_l2c_only) {
@@ -1436,7 +1437,7 @@ add_reference(arc_buf_hdr_t *hdr, kmutex_t *hash_lock, void *tag)
 			}
 			ASSERT(delta > 0);
 			ASSERT3U(*size, >=, delta);
-			atomic_add_64(size, -delta);
+			atomic_sub_64(size, delta);
 		}
 		/* remove the prefetch flag if we get a reference */
 		hdr->b_flags &= ~ARC_FLAG_PREFETCH;
@@ -1457,7 +1458,7 @@ remove_reference(arc_buf_hdr_t *hdr, kmutex_t *hash_lock, void *tag)
 	 * arc_l2c_only counts as a ghost state so we don't need to explicitly
 	 * check to prevent usage of the arc_l2c_only list.
 	 */
-	if (((cnt = refcount_remove(&hdr->b_l1hdr.b_refcnt, tag)) == 0) &&
+	if (((cnt = refcount_remove_nv(&hdr->b_l1hdr.b_refcnt, tag)) == 0) &&
 	    (state != arc_anon)) {
 		arc_buf_contents_t type = arc_buf_type(hdr);
 		multilist_t *list = &state->arcs_list[type];
@@ -1583,7 +1584,7 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
 				from_delta = hdr->b_size;
 			}
 			ASSERT3U(*size, >=, from_delta);
-			atomic_add_64(size, -from_delta);
+			atomic_sub_64(size, from_delta);
 		}
 		if (new_state != arc_anon && new_state != arc_l2c_only) {
 			uint64_t *size = &new_state->arcs_lsize[buftype];
@@ -1625,7 +1626,7 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
 			 * the reference. As a result, we use the arc
 			 * header pointer for the reference.
 			 */
-			(void) refcount_add_many(&new_state->arcs_size,
+			refcount_add_many(&new_state->arcs_size,
 			    hdr->b_size, hdr);
 		} else {
 			arc_buf_t *buf;
@@ -1638,7 +1639,7 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
 			 */
 			for (buf = hdr->b_l1hdr.b_buf; buf != NULL;
 			    buf = buf->b_next) {
-				(void) refcount_add_many(&new_state->arcs_size,
+				refcount_add_many(&new_state->arcs_size,
 				    hdr->b_size, buf);
 			}
 		}
@@ -1662,7 +1663,7 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
 			IMPLY(datacnt == 0, new_state == arc_anon ||
 			    new_state == arc_l2c_only);
 
-			(void) refcount_remove_many(&old_state->arcs_size,
+			refcount_remove_many(&old_state->arcs_size,
 			    hdr->b_size, hdr);
 		} else {
 			arc_buf_t *buf;
@@ -1675,7 +1676,7 @@ arc_change_state(arc_state_t *new_state, arc_buf_hdr_t *hdr,
 			 */
 			for (buf = hdr->b_l1hdr.b_buf; buf != NULL;
 			    buf = buf->b_next) {
-				(void) refcount_remove_many(
+				refcount_remove_many(
 				    &old_state->arcs_size, hdr->b_size, buf);
 			}
 		}
@@ -1738,25 +1739,25 @@ arc_space_return(uint64_t space, arc_space_type_t type)
 	default:
 		break;
 	case ARC_SPACE_DATA:
-		ARCSTAT_INCR(arcstat_data_size, -space);
+		ARCSTAT_DECR(arcstat_data_size, space);
 		break;
 	case ARC_SPACE_META:
-		ARCSTAT_INCR(arcstat_metadata_size, -space);
+		ARCSTAT_DECR(arcstat_metadata_size, space);
 		break;
 	case ARC_SPACE_BONUS:
-		ARCSTAT_INCR(arcstat_bonus_size, -space);
+		ARCSTAT_DECR(arcstat_bonus_size, space);
 		break;
 	case ARC_SPACE_DNODE:
-		ARCSTAT_INCR(arcstat_dnode_size, -space);
+		ARCSTAT_DECR(arcstat_dnode_size, space);
 		break;
 	case ARC_SPACE_DBUF:
-		ARCSTAT_INCR(arcstat_dbuf_size, -space);
+		ARCSTAT_DECR(arcstat_dbuf_size, space);
 		break;
 	case ARC_SPACE_HDRS:
-		ARCSTAT_INCR(arcstat_hdr_size, -space);
+		ARCSTAT_DECR(arcstat_hdr_size, space);
 		break;
 	case ARC_SPACE_L2HDRS:
-		ARCSTAT_INCR(arcstat_l2_hdr_size, -space);
+		ARCSTAT_DECR(arcstat_l2_hdr_size, space);
 		break;
 	}
 
@@ -1764,11 +1765,11 @@ arc_space_return(uint64_t space, arc_space_type_t type)
 		ASSERT(arc_meta_used >= space);
 		if (arc_meta_max < arc_meta_used)
 			arc_meta_max = arc_meta_used;
-		ARCSTAT_INCR(arcstat_meta_used, -space);
+		ARCSTAT_DECR(arcstat_meta_used, space);
 	}
 
 	ASSERT(arc_size >= space);
-	atomic_add_64(&arc_size, -space);
+	atomic_sub_64(&arc_size, space);
 }
 
 arc_buf_t *
@@ -1807,7 +1808,7 @@ arc_buf_alloc(spa_t *spa, uint64_t size, void *tag, arc_buf_contents_t type)
 
 	arc_get_data_buf(buf);
 	ASSERT(refcount_is_zero(&hdr->b_l1hdr.b_refcnt));
-	(void) refcount_add(&hdr->b_l1hdr.b_refcnt, tag);
+	refcount_add(&hdr->b_l1hdr.b_refcnt, tag);
 
 	return (buf);
 }
@@ -1839,12 +1840,13 @@ arc_return_buf(arc_buf_t *buf, void *tag)
 {
 	arc_buf_hdr_t *hdr = buf->b_hdr;
 
+#ifdef ZFS_DEBUG
 	ASSERT(buf->b_data != NULL);
 	ASSERT(HDR_HAS_L1HDR(hdr));
-	(void) refcount_add(&hdr->b_l1hdr.b_refcnt, tag);
-	(void) refcount_remove(&hdr->b_l1hdr.b_refcnt, arc_onloan_tag);
-
-	atomic_add_64(&arc_loaned_bytes, -hdr->b_size);
+	refcount_add(&hdr->b_l1hdr.b_refcnt, tag);
+	refcount_remove(&hdr->b_l1hdr.b_refcnt, arc_onloan_tag);
+#endif
+	atomic_sub_64(&arc_loaned_bytes, hdr->b_size);
 }
 
 /* Detach an arc_buf from a dbuf (tag) */
@@ -1853,10 +1855,12 @@ arc_loan_inuse_buf(arc_buf_t *buf, void *tag)
 {
 	arc_buf_hdr_t *hdr = buf->b_hdr;
 
+#ifdef ZFS_DEBUG
 	ASSERT(buf->b_data != NULL);
 	ASSERT(HDR_HAS_L1HDR(hdr));
-	(void) refcount_add(&hdr->b_l1hdr.b_refcnt, arc_onloan_tag);
-	(void) refcount_remove(&hdr->b_l1hdr.b_refcnt, tag);
+	refcount_add(&hdr->b_l1hdr.b_refcnt, arc_onloan_tag);
+	refcount_remove(&hdr->b_l1hdr.b_refcnt, tag);
+#endif
 	buf->b_efunc = NULL;
 	buf->b_private = NULL;
 
@@ -2056,10 +2060,10 @@ arc_buf_destroy(arc_buf_t *buf, boolean_t remove)
 			ASSERT(state != arc_anon && state != arc_l2c_only);
 
 			ASSERT3U(*cnt, >=, size);
-			atomic_add_64(cnt, -size);
+			atomic_sub_64(cnt, size);
 		}
 
-		(void) refcount_remove_many(&state->arcs_size, size, buf);
+		refcount_remove_many(&state->arcs_size, size, buf);
 		buf->b_data = NULL;
 
 		/*
@@ -2069,7 +2073,7 @@ arc_buf_destroy(arc_buf_t *buf, boolean_t remove)
 		if (buf->b_hdr->b_l1hdr.b_datacnt > 1 &&
 		    HDR_ISTYPE_DATA(buf->b_hdr)) {
 			ARCSTAT_BUMPDOWN(arcstat_duplicate_buffers);
-			ARCSTAT_INCR(arcstat_duplicate_buffers_size, -size);
+			ARCSTAT_DECR(arcstat_duplicate_buffers_size, size);
 		}
 		ASSERT(buf->b_hdr->b_l1hdr.b_datacnt > 0);
 		buf->b_hdr->b_l1hdr.b_datacnt -= 1;
@@ -2131,14 +2135,13 @@ arc_hdr_l2hdr_destroy(arc_buf_hdr_t *hdr)
 	 * not to decrement them for this header either.
 	 */
 	if (l2hdr->b_daddr != L2ARC_ADDR_UNSET) {
-		ARCSTAT_INCR(arcstat_l2_asize, -l2hdr->b_asize);
-		ARCSTAT_INCR(arcstat_l2_size, -hdr->b_size);
+		ARCSTAT_DECR(arcstat_l2_asize, l2hdr->b_asize);
+		ARCSTAT_DECR(arcstat_l2_size, hdr->b_size);
 
 		vdev_space_update(dev->l2ad_vdev,
 		    -l2hdr->b_asize, 0, 0);
 
-		(void) refcount_remove_many(&dev->l2ad_alloc,
-		    l2hdr->b_asize, hdr);
+		refcount_remove_many(&dev->l2ad_alloc, l2hdr->b_asize, hdr);
 	}
 
 	hdr->b_flags &= ~ARC_FLAG_HAS_L2HDR;
@@ -3239,7 +3242,7 @@ arc_shrink(int64_t to_free)
 
 	if (c > to_free && c - to_free > arc_c_min) {
 		arc_c = c - to_free;
-		atomic_add_64(&arc_p, -(arc_p >> arc_shrink_shift));
+		atomic_sub_64(&arc_p, arc_p >> arc_shrink_shift);
 		if (arc_c > arc_size)
 			arc_c = MAX(arc_size, arc_c_min);
 		if (arc_p > arc_c)
@@ -3913,7 +3916,7 @@ arc_get_data_buf(arc_buf_t *buf)
 		arc_buf_hdr_t *hdr = buf->b_hdr;
 		arc_state_t *state = hdr->b_l1hdr.b_state;
 
-		(void) refcount_add_many(&state->arcs_size, size, buf);
+		refcount_add_many(&state->arcs_size, size, buf);
 
 		/*
 		 * If this is reached via arc_read, the link is
@@ -4677,7 +4680,7 @@ arc_remove_prune_callback(arc_prune_t *p)
 	boolean_t wait = B_FALSE;
 	mutex_enter(&arc_prune_mtx);
 	list_remove(&arc_prune_list, p);
-	if (refcount_remove(&p->p_refcnt, &arc_prune_list) > 0)
+	if (refcount_remove_nv(&p->p_refcnt, &arc_prune_list) > 0)
 		wait = B_TRUE;
 	mutex_exit(&arc_prune_mtx);
 
@@ -4904,8 +4907,7 @@ arc_release(arc_buf_t *buf, void *tag)
 
 		ASSERT3P(state, !=, arc_l2c_only);
 
-		(void) refcount_remove_many(
-		    &state->arcs_size, hdr->b_size, buf);
+		refcount_remove_many(&state->arcs_size, hdr->b_size, buf);
 
 		if (refcount_is_zero(&hdr->b_l1hdr.b_refcnt)) {
 			uint64_t *size;
@@ -4913,7 +4915,7 @@ arc_release(arc_buf_t *buf, void *tag)
 			ASSERT3P(state, !=, arc_l2c_only);
 			size = &state->arcs_lsize[type];
 			ASSERT3U(*size, >=, hdr->b_size);
-			atomic_add_64(size, -hdr->b_size);
+			atomic_sub_64(size, hdr->b_size);
 		}
 
 		/*
@@ -4922,8 +4924,8 @@ arc_release(arc_buf_t *buf, void *tag)
 		 */
 		if (HDR_ISTYPE_DATA(hdr)) {
 			ARCSTAT_BUMPDOWN(arcstat_duplicate_buffers);
-			ARCSTAT_INCR(arcstat_duplicate_buffers_size,
-			    -hdr->b_size);
+			ARCSTAT_DECR(arcstat_duplicate_buffers_size,
+			    hdr->b_size);
 		}
 		hdr->b_l1hdr.b_datacnt -= 1;
 		arc_cksum_verify(buf);
@@ -4951,10 +4953,10 @@ arc_release(arc_buf_t *buf, void *tag)
 		nhdr->b_l1hdr.b_tmp_cdata = NULL;
 		nhdr->b_freeze_cksum = NULL;
 
-		(void) refcount_add(&nhdr->b_l1hdr.b_refcnt, tag);
+		refcount_add(&nhdr->b_l1hdr.b_refcnt, tag);
 		buf->b_hdr = nhdr;
 		mutex_exit(&buf->b_evict_lock);
-		(void) refcount_add_many(&arc_anon->arcs_size, blksz, buf);
+		refcount_add_many(&arc_anon->arcs_size, blksz, buf);
 	} else {
 		mutex_exit(&buf->b_evict_lock);
 		ASSERT(refcount_count(&hdr->b_l1hdr.b_refcnt) == 1);
@@ -4996,7 +4998,7 @@ arc_referenced(arc_buf_t *buf)
 	int referenced;
 
 	mutex_enter(&buf->b_evict_lock);
-	referenced = (refcount_count(&buf->b_hdr->b_l1hdr.b_refcnt));
+	referenced = refcount_count(&buf->b_hdr->b_l1hdr.b_refcnt);
 	mutex_exit(&buf->b_evict_lock);
 	return (referenced);
 }
@@ -5219,7 +5221,7 @@ arc_memory_throttle(uint64_t reserve, uint64_t txg)
 void
 arc_tempreserve_clear(uint64_t reserve)
 {
-	atomic_add_64(&arc_tempreserve, -reserve);
+	atomic_sub_64(&arc_tempreserve, reserve);
 	ASSERT((int64_t)arc_tempreserve >= 0);
 }
 
@@ -6121,7 +6123,7 @@ top:
 
 			ARCSTAT_BUMP(arcstat_l2_writes_skip_toobig);
 
-			(void) refcount_remove_many(&dev->l2ad_alloc,
+			refcount_remove_many(&dev->l2ad_alloc,
 			    hdr->b_l2hdr.b_asize, hdr);
 		} else if (zio->io_error != 0) {
 			/*
@@ -6130,11 +6132,11 @@ top:
 			list_remove(buflist, hdr);
 			hdr->b_flags &= ~ARC_FLAG_HAS_L2HDR;
 
-			ARCSTAT_INCR(arcstat_l2_asize, -hdr->b_l2hdr.b_asize);
-			ARCSTAT_INCR(arcstat_l2_size, -hdr->b_size);
+			ARCSTAT_DECR(arcstat_l2_asize, hdr->b_l2hdr.b_asize);
+			ARCSTAT_DECR(arcstat_l2_size, hdr->b_size);
 
 			bytes_dropped += hdr->b_l2hdr.b_asize;
-			(void) refcount_remove_many(&dev->l2ad_alloc,
+			refcount_remove_many(&dev->l2ad_alloc,
 			    hdr->b_l2hdr.b_asize, hdr);
 		}
 
@@ -6664,7 +6666,7 @@ l2arc_write_buffers(spa_t *spa, l2arc_dev_t *dev, uint64_t target_sz,
 		 * not, otherwise, when this l2hdr is evicted we'll
 		 * remove a reference that was never added.
 		 */
-		(void) refcount_add_many(&dev->l2ad_alloc, buf_sz, hdr);
+		refcount_add_many(&dev->l2ad_alloc, buf_sz, hdr);
 
 		/* Compression may have squashed the buffer to zero length. */
 		if (buf_sz != 0) {
