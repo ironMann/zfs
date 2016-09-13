@@ -367,6 +367,9 @@ vdev_queue_init(vdev_t *vd)
 	vq->vq_vdev = vd;
 	taskq_init_ent(&vd->vdev_queue.vq_io_search.io_tqent);
 
+	vq->vq_last_offset = 0;
+	vq->vq_seek_offset = 0;
+
 	avl_create(&vq->vq_active_tree, vdev_queue_offset_compare,
 	    sizeof (zio_t), offsetof(struct zio, io_queue_node));
 	avl_create(vdev_queue_type_tree(vq, ZIO_TYPE_READ),
@@ -391,8 +394,6 @@ vdev_queue_init(vdev_t *vd)
 		avl_create(vdev_queue_class_tree(vq, p), compfn,
 			sizeof (zio_t), offsetof(struct zio, io_queue_node));
 	}
-
-	vq->vq_lastoffset = 0;
 }
 
 void
@@ -688,8 +689,7 @@ again:
 	tree = vdev_queue_class_tree(vq, p);
 	vq->vq_io_search.io_timestamp = 0;
 	vq->vq_io_search.io_offset = vq->vq_last_offset + 1;
-	VERIFY3P(avl_find(tree, &vq->vq_io_search,
-	    &idx), ==, NULL);
+	VERIFY3P(avl_find(tree, &vq->vq_io_search, &idx), ==, NULL);
 	zio = avl_nearest(tree, idx, AVL_AFTER);
 	if (zio == NULL)
 		zio = avl_first(tree);
@@ -717,6 +717,7 @@ again:
 
 	vdev_queue_pending_add(vq, zio);
 	vq->vq_last_offset = zio->io_offset;
+	vq->vq_seek_offset = zio->io_offset + zio->io_size;
 
 	return (zio);
 }
@@ -806,16 +807,11 @@ vdev_queue_length(vdev_t *vd)
 }
 
 uint64_t
-vdev_queue_lastoffset(vdev_t *vd)
+vdev_queue_seek_offset(vdev_t *vd)
 {
-	return (vd->vdev_queue.vq_lastoffset);
+	return (vd->vdev_queue.vq_seek_offset);
 }
 
-void
-vdev_queue_register_lastoffset(vdev_t *vd, zio_t *zio)
-{
-	vd->vdev_queue.vq_lastoffset = zio->io_offset + zio->io_size;
-}
 
 #if defined(_KERNEL) && defined(HAVE_SPL)
 module_param(zfs_vdev_aggregation_limit, int, 0644);

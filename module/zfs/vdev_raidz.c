@@ -1440,6 +1440,112 @@ vdev_raidz_child_done(zio_t *zio)
 	rc->rc_skipped = 0;
 }
 
+static void
+vdev_raidz_mirror_child_done(zio_t *zio)
+{
+	raidz_col_t *mrc = (raidz_col_t *) zio->io_private;
+
+	mrc->rc_error = zio->io_error;
+}
+
+
+/* Rotating media load calculation configuration. */
+static int zfs_vdev_raidz_rotating_inc = 1;
+static int zfs_vdev_raidz_rotating_seek_inc = 5;
+static unsigned long zfs_vdev_raidz_rotating_seek_offset = 1UL << 20; /* 1MiB */
+
+/* Non-rotating media load calculation configuration. */
+static int zfs_vdev_raidz_non_rotating_inc = 0;
+static int zfs_vdev_raidz_non_rotating_seek_inc = 1;
+
+/*
+ * Try to estimate load of a raidz child. Heuristic and tunables are taken
+ * from vdev_raidz.
+ */
+static int
+vdev_raidz_child_load(vdev_t *vd, uint64_t offset)
+{
+	const int load = vdev_queue_length(vd);
+	const uint64_t seek_offset = vdev_queue_seek_offset(vd);
+	int64_t diff;
+
+	if (vd->vdev_children == 0)
+		offset += VDEV_LABEL_START_SIZE;
+
+	/* Fix offset of leaf vdevs */
+	if (vd->vdev_nonrot) {
+		/* Non-rotating media. */
+		if (seek_offset == offset)
+			return (load + zfs_vdev_raidz_non_rotating_inc);
+
+		/*
+		 * Apply a seek penalty even for non-rotating devices as
+		 * sequential I/O's can be aggregated into fewer operations on
+		 * the device, thus avoiding unnecessary per-command overhead
+		 * and boosting performance.
+		 */
+		return (load + zfs_vdev_raidz_non_rotating_seek_inc);
+	}
+
+	/* Rotating media I/O's which directly follow the last I/O. */
+	if (seek_offset == offset)
+		return (load + zfs_vdev_raidz_rotating_inc);
+
+	/*
+	 * Apply half the seek increment to I/O's within seek offset
+	 * of the last I/O queued to this vdev as they should incur less
+	 * of a seek increment.
+	 */
+	diff = seek_offset - offset;
+	if (ABS(diff) < zfs_vdev_raidz_rotating_seek_offset)
+		return (load + (zfs_vdev_raidz_rotating_seek_inc / 2));
+
+	/* Apply the full seek increment to all other I/O's. */
+	return (load + zfs_vdev_raidz_rotating_seek_inc);
+}
+
+/*
+ * Check all possible hybrid children and determine best match based on load.
+ * On any sign of trouble, return -1, indicating the default read logic should
+ * be used.
+ */
+static int
+vdev_raidz_mirror_child_select(raidz_map_t *rm, zio_t *zio)
+{
+	vdev_t *vd = zio->io_vd;
+	raidz_col_t *rc;
+	vdev_t *cvd;
+	int c, best_col, lowest_load, load;
+
+	/* Don't search for raidz-mirror */
+	if (zio->io_flags & (ZIO_FLAG_SCRUB | ZIO_FLAG_RESILVER))
+		return (-1);
+
+	lowest_load = INT_MAX;
+	best_col = rm->rm_firstdatacol;
+
+	ASSERT3U(rm->rm_firstdatacol, ==, rm->rm_cols - 1);
+
+	for (c = rm->rm_firstdatacol; c >= 0; c--) {
+		rc = &rm->rm_col[c];
+		cvd = vd->vdev_child[rc->rc_devidx];
+
+		if (rc->rc_error || rc->rc_tried || rc->rc_skipped ||
+		    cvd == NULL || !vdev_readable(cvd) ||
+		    !vdev_dtl_empty(cvd, DTL_MISSING))
+			return (-1);
+
+		load = vdev_raidz_child_load(cvd, rc->rc_offset);
+		if (load >= lowest_load)
+			continue;
+
+		lowest_load = load;
+		best_col = c;
+	}
+
+	return (best_col);
+}
+
 /*
  * Start an IO operation on a RAIDZ VDev
  *
@@ -1506,6 +1612,34 @@ vdev_raidz_io_start(zio_t *zio)
 	}
 
 	ASSERT(zio->io_type == ZIO_TYPE_READ);
+
+	/*
+	 * RAID-Z Mirrored read:
+	 *
+	 * Find the best child to read from in case the zio is only a single
+	 * block long, in which case: data == P == Q == R (the block is mirrored
+	 * in parity blocks). We can choose from (nparity + 1) child vdevs,
+	 * which improves IOPS for small reads, such as metadata, etc.
+	 */
+	if ((zio->io_size >> tvd->vdev_ashift) == 1) {
+		raidz_col_t *arc = &rm->rm_col[rm->rm_firstdatacol];
+
+		c = vdev_raidz_mirror_child_select(rm, zio);
+		if (c < 0 || c == rm->rm_firstdatacol)
+			goto read_fallback;
+
+		rc = &rm->rm_col[c];
+		cvd = vd->vdev_child[rc->rc_devidx];
+
+		zio_nowait(zio_vdev_child_io(zio, NULL, cvd, rc->rc_offset,
+		    arc->rc_data, rc->rc_size, zio->io_type, zio->io_priority,
+		    0, vdev_raidz_mirror_child_done, rc));
+
+		zio_execute(zio);
+		return;
+	}
+
+read_fallback:
 
 	/*
 	 * Iterate over the columns in reverse order so that we hit the parity
@@ -2109,3 +2243,28 @@ vdev_ops_t vdev_raidz_ops = {
 	VDEV_TYPE_RAIDZ,	/* name of this vdev type */
 	B_FALSE			/* not a leaf vdev */
 };
+
+
+#if defined(_KERNEL) && defined(HAVE_SPL)
+module_param(zfs_vdev_raidz_rotating_inc, int, 0644);
+MODULE_PARM_DESC(zfs_vdev_raidz_rotating_inc,
+	"Rotating media load increment for non-seeking I/O's");
+
+module_param(zfs_vdev_raidz_rotating_seek_inc, int, 0644);
+MODULE_PARM_DESC(zfs_vdev_raidz_rotating_seek_inc,
+	"Rotating media load increment for seeking I/O's");
+
+module_param(zfs_vdev_raidz_rotating_seek_offset, ulong, 0644);
+MODULE_PARM_DESC(zfs_vdev_raidz_rotating_seek_offset,
+	"Offset in bytes from the last I/O which "
+	"triggers a reduced rotating media seek increment");
+
+module_param(zfs_vdev_raidz_non_rotating_inc, int, 0644);
+MODULE_PARM_DESC(zfs_vdev_raidz_non_rotating_inc,
+	"Non-rotating media load increment for non-seeking I/O's");
+
+module_param(zfs_vdev_raidz_non_rotating_seek_inc, int, 0644);
+MODULE_PARM_DESC(zfs_vdev_raidz_non_rotating_seek_inc,
+	"Non-rotating media load increment for seeking I/O's");
+
+#endif

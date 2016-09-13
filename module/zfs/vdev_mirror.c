@@ -116,11 +116,16 @@ static int
 vdev_mirror_load(mirror_map_t *mm, vdev_t *vd, uint64_t zio_offset)
 {
 	uint64_t lastoffset;
+	int64_t diff;
 	int load;
 
 	/* All DVAs have equal weight at the root. */
 	if (mm->mm_root)
 		return (INT_MAX);
+
+	/* Fix offset of leaf vdevs */
+	if (vd->vdev_children == 0)
+		zio_offset += VDEV_LABEL_START_SIZE;
 
 	/*
 	 * We don't return INT_MAX if the device is resilvering i.e.
@@ -130,7 +135,7 @@ vdev_mirror_load(mirror_map_t *mm, vdev_t *vd, uint64_t zio_offset)
 
 	/* Standard load based on pending queue length. */
 	load = vdev_queue_length(vd);
-	lastoffset = vdev_queue_lastoffset(vd);
+	lastoffset = vdev_queue_seek_offset(vd);
 
 	if (vd->vdev_nonrot) {
 		/* Non-rotating media. */
@@ -155,8 +160,8 @@ vdev_mirror_load(mirror_map_t *mm, vdev_t *vd, uint64_t zio_offset)
 	 * of the last I/O queued to this vdev as they should incure less
 	 * of a seek increment.
 	 */
-	if (ABS(lastoffset - zio_offset) <
-	    zfs_vdev_mirror_rotating_seek_offset)
+	diff = lastoffset - zio_offset;
+	if (ABS(diff) < zfs_vdev_mirror_rotating_seek_offset)
 		return (load + (zfs_vdev_mirror_rotating_seek_inc / 2));
 
 	/* Apply the full seek increment to all other I/O's. */
@@ -381,29 +386,19 @@ vdev_mirror_child_select(zio_t *zio)
 		mm->mm_preferred_cnt++;
 	}
 
-	if (mm->mm_preferred_cnt == 1) {
-		vdev_queue_register_lastoffset(
-		    mm->mm_child[mm->mm_preferred[0]].mc_vd, zio);
+	if (mm->mm_preferred_cnt == 1)
 		return (mm->mm_preferred[0]);
-	}
 
-	if (mm->mm_preferred_cnt > 1) {
-		int c = vdev_mirror_preferred_child_randomize(zio);
-
-		vdev_queue_register_lastoffset(mm->mm_child[c].mc_vd, zio);
-		return (c);
-	}
+	if (mm->mm_preferred_cnt > 1)
+		return (vdev_mirror_preferred_child_randomize(zio));
 
 	/*
 	 * Every device is either missing or has this txg in its DTL.
 	 * Look for any child we haven't already tried before giving up.
 	 */
 	for (c = 0; c < mm->mm_children; c++) {
-		if (!mm->mm_child[c].mc_tried) {
-			vdev_queue_register_lastoffset(mm->mm_child[c].mc_vd,
-			    zio);
+		if (!mm->mm_child[c].mc_tried)
 			return (c);
-		}
 	}
 
 	/*
