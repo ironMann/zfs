@@ -367,7 +367,6 @@ vdev_queue_init(vdev_t *vd)
 	vq->vq_vdev = vd;
 	taskq_init_ent(&vd->vdev_queue.vq_io_search.io_tqent);
 
-	vq->vq_last_offset = 0;
 	vq->vq_seek_offset = 0;
 
 	avl_create(&vq->vq_active_tree, vdev_queue_offset_compare,
@@ -688,7 +687,7 @@ again:
 	 */
 	tree = vdev_queue_class_tree(vq, p);
 	vq->vq_io_search.io_timestamp = 0;
-	vq->vq_io_search.io_offset = vq->vq_last_offset + 1;
+	vq->vq_io_search.io_offset = vq->vq_seek_offset - 1;
 	VERIFY3P(avl_find(tree, &vq->vq_io_search, &idx), ==, NULL);
 	zio = avl_nearest(tree, idx, AVL_AFTER);
 	if (zio == NULL)
@@ -716,7 +715,6 @@ again:
 	}
 
 	vdev_queue_pending_add(vq, zio);
-	vq->vq_last_offset = zio->io_offset;
 	vq->vq_seek_offset = zio->io_offset + zio->io_size;
 
 	return (zio);
