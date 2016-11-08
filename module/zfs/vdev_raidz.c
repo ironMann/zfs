@@ -136,7 +136,9 @@ vdev_raidz_map_free(raidz_map_t *rm)
 	size_t size;
 
 	for (c = 0; c < rm->rm_firstdatacol; c++) {
-		zio_buf_free(rm->rm_col[c].rc_data, rm->rm_col[c].rc_size);
+		if (rm->rm_col[c].rc_data != NULL)
+			zio_buf_free(rm->rm_col[c].rc_data,
+			    rm->rm_col[c].rc_size);
 
 		if (rm->rm_col[c].rc_gdata != NULL)
 			zio_buf_free(rm->rm_col[c].rc_gdata,
@@ -377,6 +379,7 @@ vdev_raidz_map_alloc(zio_t *zio, uint64_t unit_shift, uint64_t dcols,
 	rm->rm_reports = 0;
 	rm->rm_freed = 0;
 	rm->rm_ecksuminjected = 0;
+	rm->rm_readmirror = B_FALSE;
 
 	asize = 0;
 
@@ -412,7 +415,7 @@ vdev_raidz_map_alloc(zio_t *zio, uint64_t unit_shift, uint64_t dcols,
 	ASSERT3U(rm->rm_nskip, <=, nparity);
 
 	for (c = 0; c < rm->rm_firstdatacol; c++)
-		rm->rm_col[c].rc_data = zio_buf_alloc(rm->rm_col[c].rc_size);
+		rm->rm_col[c].rc_data = NULL;
 
 	rm->rm_col[c].rc_data = zio->io_data;
 
@@ -462,6 +465,21 @@ vdev_raidz_map_alloc(zio_t *zio, uint64_t unit_shift, uint64_t dcols,
 	rm->rm_ops = vdev_raidz_math_get_ops();
 
 	return (rm);
+}
+
+/*
+ * Allocate parity buffers
+ */
+void
+vdev_raidz_map_alloc_parity(raidz_map_t *rm)
+{
+	int c;
+
+	for (c = 0; c < rm->rm_firstdatacol; c++) {
+		if (rm->rm_col[c].rc_data == NULL)
+			rm->rm_col[c].rc_data =
+			    zio_buf_alloc(rm->rm_col[c].rc_size);
+	}
 }
 
 static void
@@ -1440,14 +1458,6 @@ vdev_raidz_child_done(zio_t *zio)
 	rc->rc_skipped = 0;
 }
 
-static void
-vdev_raidz_mirror_child_done(zio_t *zio)
-{
-	raidz_col_t *mrc = (raidz_col_t *) zio->io_private;
-
-	mrc->rc_error = zio->io_error;
-}
-
 
 /* Rotating media load calculation configuration. */
 static int zfs_vdev_raidz_rotating_inc = 1;
@@ -1530,9 +1540,8 @@ vdev_raidz_mirror_child_select(raidz_map_t *rm, zio_t *zio)
 		rc = &rm->rm_col[c];
 		cvd = vd->vdev_child[rc->rc_devidx];
 
-		if (rc->rc_error || rc->rc_tried || rc->rc_skipped ||
-		    cvd == NULL || !vdev_readable(cvd) ||
-		    !vdev_dtl_empty(cvd, DTL_MISSING))
+		if (cvd == NULL || !vdev_readable(cvd) ||
+		    vdev_dtl_contains(cvd, DTL_MISSING, zio->io_txg, 1))
 			return (-1);
 
 		load = vdev_raidz_child_load(cvd, rc->rc_offset);
@@ -1571,6 +1580,7 @@ vdev_raidz_io_start(zio_t *zio)
 	vdev_t *cvd;
 	raidz_map_t *rm;
 	raidz_col_t *rc;
+	boolean_t palloc = B_FALSE;
 	int c, i;
 
 	rm = vdev_raidz_map_alloc(zio, tvd->vdev_ashift, vd->vdev_children,
@@ -1579,15 +1589,33 @@ vdev_raidz_io_start(zio_t *zio)
 	ASSERT3U(rm->rm_asize, ==, vdev_psize_to_asize(vd, zio->io_size));
 
 	if (zio->io_type == ZIO_TYPE_WRITE) {
-		vdev_raidz_generate_parity(rm);
 
-		for (c = 0; c < rm->rm_cols; c++) {
-			rc = &rm->rm_col[c];
-			cvd = vd->vdev_child[rc->rc_devidx];
-			zio_nowait(zio_vdev_child_io(zio, NULL, cvd,
-			    rc->rc_offset, rc->rc_data, rc->rc_size,
-			    zio->io_type, zio->io_priority, 0,
-			    vdev_raidz_child_done, rc));
+		/* RAID-Z Mirror write */
+		if ((zio->io_size >> tvd->vdev_ashift) == 1) {
+			raidz_col_t *arc = &rm->rm_col[rm->rm_firstdatacol];
+
+			for (c = 0; c < rm->rm_cols; c++) {
+				rc = &rm->rm_col[c];
+				cvd = vd->vdev_child[rc->rc_devidx];
+
+				zio_nowait(zio_vdev_child_io(zio, NULL, cvd,
+				    rc->rc_offset, arc->rc_data, rc->rc_size,
+				    zio->io_type, zio->io_priority, 0,
+				    vdev_raidz_child_done, rc));
+			}
+		} else {
+
+			vdev_raidz_map_alloc_parity(rm);
+			vdev_raidz_generate_parity(rm);
+
+			for (c = 0; c < rm->rm_cols; c++) {
+				rc = &rm->rm_col[c];
+				cvd = vd->vdev_child[rc->rc_devidx];
+				zio_nowait(zio_vdev_child_io(zio, NULL, cvd,
+				    rc->rc_offset, rc->rc_data, rc->rc_size,
+				    zio->io_type, zio->io_priority, 0,
+				    vdev_raidz_child_done, rc));
+			}
 		}
 
 		/*
@@ -1633,14 +1661,15 @@ vdev_raidz_io_start(zio_t *zio)
 
 		zio_nowait(zio_vdev_child_io(zio, NULL, cvd, rc->rc_offset,
 		    arc->rc_data, rc->rc_size, zio->io_type, zio->io_priority,
-		    0, vdev_raidz_mirror_child_done, rc));
+		    0, vdev_raidz_child_done, rc));
+
+		rm->rm_readmirror = B_TRUE;
 
 		zio_execute(zio);
 		return;
 	}
 
 read_fallback:
-
 	/*
 	 * Iterate over the columns in reverse order so that we hit the parity
 	 * last -- any errors along the way will force us to read the parity.
@@ -1669,6 +1698,12 @@ read_fallback:
 		}
 		if (c >= rm->rm_firstdatacol || rm->rm_missingdata > 0 ||
 		    (zio->io_flags & (ZIO_FLAG_SCRUB | ZIO_FLAG_RESILVER))) {
+
+			if (c < rm->rm_firstdatacol && !palloc) {
+				palloc = B_TRUE;
+				vdev_raidz_map_alloc_parity(rm);
+			}
+
 			zio_nowait(zio_vdev_child_io(zio, NULL, cvd,
 			    rc->rc_offset, rc->rc_data, rc->rc_size,
 			    zio->io_type, zio->io_priority, 0,
@@ -1975,7 +2010,7 @@ vdev_raidz_io_done(zio_t *zio)
 
 	ASSERT(zio->io_bp != NULL);  /* XXX need to add code to enforce this */
 
-	ASSERT(rm->rm_missingparity <= rm->rm_firstdatacol);
+	ASSERT(rm->rm_missingparity <= raidz_parity(rm));
 	ASSERT(rm->rm_missingdata <= rm->rm_cols - rm->rm_firstdatacol);
 
 	for (c = 0; c < rm->rm_cols; c++) {
@@ -2010,13 +2045,40 @@ vdev_raidz_io_done(zio_t *zio)
 		 * if we intend to reallocate.
 		 */
 		/* XXPOLICY */
-		if (total_errors > rm->rm_firstdatacol)
+		if (total_errors > raidz_parity(rm))
 			zio->io_error = vdev_raidz_worst_error(rm);
 
 		return;
 	}
 
 	ASSERT(zio->io_type == ZIO_TYPE_READ);
+
+	/*
+	 * RAID-Z Mirror read:
+	 * In case of an IO error, re-read all vdevs we have not tried already
+	 */
+	if (rm->rm_readmirror && parity_errors > 0) {
+
+		zio_vdev_io_redone(zio);
+		vdev_raidz_map_alloc_parity(rm);
+		rm->rm_readmirror = B_FALSE;
+
+		for (c = 0; c < rm->rm_cols; c++) {
+			rc = &rm->rm_col[c];
+
+			if (rc->rc_tried)
+				continue;
+
+			zio_nowait(zio_vdev_child_io(zio, NULL,
+			    vd->vdev_child[rc->rc_devidx],
+			    rc->rc_offset, rc->rc_data, rc->rc_size,
+			    zio->io_type, zio->io_priority, 0,
+			    vdev_raidz_child_done, rc));
+		}
+
+		return;
+	}
+
 	/*
 	 * There are three potential phases for a read:
 	 *	1. produce valid data from the columns read
@@ -2034,9 +2096,16 @@ vdev_raidz_io_done(zio_t *zio)
 	 * has a valid checksum. Naturally, this case applies in the absence of
 	 * any errors.
 	 */
-	if (total_errors <= rm->rm_firstdatacol - parity_untried) {
+	if (total_errors <= raidz_parity(rm) - parity_untried) {
 		if (data_errors == 0) {
 			if (raidz_checksum_verify(zio) == 0) {
+				/*
+				 * If we read from mirror-vdev and returned data
+				 * is correct there's no need to verify parity
+				 */
+				if (rm->rm_readmirror)
+					goto done;
+
 				/*
 				 * If we read parity information (unnecessarily
 				 * as it happens since no reconstruction was
@@ -2046,12 +2115,12 @@ vdev_raidz_io_done(zio_t *zio)
 				 * later.
 				 */
 				if (parity_errors + parity_untried <
-				    rm->rm_firstdatacol ||
+				    raidz_parity(rm) ||
 				    (zio->io_flags & ZIO_FLAG_RESILVER)) {
 					n = raidz_parity_verify(zio, rm);
 					unexpected_errors += n;
 					ASSERT(parity_errors + n <=
-					    rm->rm_firstdatacol);
+					    raidz_parity(rm));
 				}
 				goto done;
 			}
@@ -2125,6 +2194,8 @@ vdev_raidz_io_done(zio_t *zio)
 			continue;
 
 		zio_vdev_io_redone(zio);
+		vdev_raidz_map_alloc_parity(rm);
+
 		do {
 			rc = &rm->rm_col[c];
 			if (rc->rc_tried)
@@ -2149,10 +2220,10 @@ vdev_raidz_io_done(zio_t *zio)
 	 * reconstruction over all possible combinations. If that fails,
 	 * we're cooked.
 	 */
-	if (total_errors > rm->rm_firstdatacol) {
+	if (total_errors > raidz_parity(rm)) {
 		zio->io_error = vdev_raidz_worst_error(rm);
 
-	} else if (total_errors < rm->rm_firstdatacol &&
+	} else if (total_errors < raidz_parity(rm) &&
 	    (code = vdev_raidz_combrec(zio, total_errors, data_errors)) != 0) {
 		/*
 		 * If we didn't use all the available parity for the

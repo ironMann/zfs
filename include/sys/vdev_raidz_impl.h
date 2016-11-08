@@ -125,6 +125,7 @@ typedef struct raidz_map {
 	size_t rm_reports;		/* # of referencing checksum reports */
 	unsigned int rm_freed;		/* map no longer has referencing ZIO */
 	unsigned int rm_ecksuminjected;	/* checksum error was injected */
+	boolean_t rm_readmirror;	/* mirror read of short ZIOs */
 	raidz_impl_ops_t *rm_ops;	/* RAIDZ math operations */
 	raidz_col_t rm_col[1];		/* Flexible array of I/O columns */
 } raidz_map_t;
