@@ -3447,17 +3447,18 @@ zio_checksum_verified(zio_t *zio)
 
 /*
  * ==========================================================================
- * Error rank.  Error are ranked in the order 0, ENXIO, ECKSUM, EIO, other.
- * An error of 0 indicates success.  ENXIO indicates whole-device failure,
- * which may be transient (e.g. unplugged) or permament.  ECKSUM and EIO
- * indicate errors that are specific to one I/O, and most likely permanent.
- * Any other error is presumed to be worse because we weren't expecting it.
+ * Error rank.  Error are ranked in the order 0, ENODATA, ENXIO, ECKSUM, EIO,
+ * other. An error of 0 indicates success. ENODATA indicates data read has not
+ * been attempted. ENXIO indicates whole-device failure, which may be transient
+ * (e.g. unplugged) or permament.  ECKSUM and EIO indicate errors that are
+ * specific to one I/O, and most likely permanent. Any other error is presumed
+ * to be worse because we weren't expecting it.
  * ==========================================================================
  */
 int
 zio_worst_error(int e1, int e2)
 {
-	static int zio_error_rank[] = { 0, ENXIO, ECKSUM, EIO };
+	static const int zio_error_rank[] = { 0, ENODATA, ENXIO, ECKSUM, EIO };
 	int r1, r2;
 
 	for (r1 = 0; r1 < sizeof (zio_error_rank) / sizeof (int); r1++)

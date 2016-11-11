@@ -176,7 +176,7 @@ vdev_raidz_math_generate(raidz_map_t *rm)
 }
 
 static raidz_rec_f
-reconstruct_fun_p_sel(raidz_map_t *rm, const int *parity_valid,
+reconstruct_fun_p_sel(raidz_map_t *rm, const boolean_t *parity_valid,
 	const int nbaddata)
 {
 	if (nbaddata == 1 && parity_valid[CODE_P]) {
@@ -186,7 +186,7 @@ reconstruct_fun_p_sel(raidz_map_t *rm, const int *parity_valid,
 }
 
 static raidz_rec_f
-reconstruct_fun_pq_sel(raidz_map_t *rm, const int *parity_valid,
+reconstruct_fun_pq_sel(raidz_map_t *rm, const boolean_t *parity_valid,
 	const int nbaddata)
 {
 	if (nbaddata == 1) {
@@ -203,7 +203,7 @@ reconstruct_fun_pq_sel(raidz_map_t *rm, const int *parity_valid,
 }
 
 static raidz_rec_f
-reconstruct_fun_pqr_sel(raidz_map_t *rm, const int *parity_valid,
+reconstruct_fun_pqr_sel(raidz_map_t *rm, const boolean_t *parity_valid,
 	const int nbaddata)
 {
 	if (nbaddata == 1) {
@@ -237,7 +237,7 @@ reconstruct_fun_pqr_sel(raidz_map_t *rm, const int *parity_valid,
  * @nbaddata     - Number of failed data columns
  */
 int
-vdev_raidz_math_reconstruct(raidz_map_t *rm, const int *parity_valid,
+vdev_raidz_math_reconstruct(raidz_map_t *rm, const boolean_t *parity_valid,
 	const int *dt, const int nbaddata)
 {
 	raidz_rec_f rec_data = NULL;
@@ -368,17 +368,28 @@ benchmark_gen_impl(raidz_map_t *rm, const int fn)
 static void
 benchmark_rec_impl(raidz_map_t *rm, const int fn)
 {
-	static const int rec_tgt[7][3] = {
-		{1, 2, 3},	/* rec_p:   bad QR & D[0]	*/
-		{0, 2, 3},	/* rec_q:   bad PR & D[0]	*/
-		{0, 1, 3},	/* rec_r:   bad PQ & D[0]	*/
+	static const int rec_tgt[7][4] = {
+		{1, 3},	/* rec_p:   bad QR & D[0]	*/
+		{1, 3},	/* rec_q:   bad PR & D[0]	*/
+		{1, 3},	/* rec_r:   bad PQ & D[0]	*/
 		{2, 3, 4},	/* rec_pq:  bad R  & D[0][1]	*/
-		{1, 3, 4},	/* rec_pr:  bad Q  & D[0][1]	*/
-		{0, 3, 4},	/* rec_qr:  bad P  & D[0][1]	*/
-		{3, 4, 5}	/* rec_pqr: bad    & D[0][1][2] */
+		{2, 3, 4},	/* rec_pr:  bad Q  & D[0][1]	*/
+		{2, 3, 4},	/* rec_qr:  bad P  & D[0][1]	*/
+		{3, 3, 4, 5}	/* rec_pqr: bad    & D[0][1][2] */
 	};
 
-	vdev_raidz_reconstruct(rm, rec_tgt[fn], 3);
+	static const boolean_t rec_par[7][3] = {
+		{ B_TRUE,	B_FALSE,	B_FALSE },	/* REC_P */
+		{ B_FALSE,	B_TRUE,		B_FALSE },	/* REC_Q */
+		{ B_FALSE,	B_FALSE,	B_TRUE	},	/* REC_R */
+		{ B_TRUE,	B_TRUE,		B_FALSE },	/* REC_PQ */
+		{ B_TRUE,	B_FALSE,	B_TRUE	},	/* REC_PR */
+		{ B_FALSE,	B_TRUE,		B_TRUE	},	/* REC_QR */
+		{ B_TRUE,	B_TRUE, 	B_TRUE	}	/* REC_PQR */
+	};
+
+
+	vdev_raidz_reconstruct(rm, rec_par[fn], &rec_tgt[fn][1], rec_tgt[fn][0]);
 }
 
 /*

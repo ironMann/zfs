@@ -109,6 +109,7 @@ typedef struct raidz_col {
 	int rc_error;			/* I/O error for this device */
 	unsigned int rc_tried;		/* Did we attempt this I/O column? */
 	unsigned int rc_skipped;	/* Did we skip this I/O column? */
+	boolean_t rc_rewrite;		/* Self heal this column */
 } raidz_col_t;
 
 typedef struct raidz_map {
@@ -126,6 +127,7 @@ typedef struct raidz_map {
 	unsigned int rm_freed;		/* map no longer has referencing ZIO */
 	unsigned int rm_ecksuminjected;	/* checksum error was injected */
 	boolean_t rm_readmirror;	/* mirror read of short ZIOs */
+	boolean_t rm_do_combrec;	/* perform cobrec as a last resort */
 	raidz_impl_ops_t *rm_ops;	/* RAIDZ math operations */
 	raidz_col_t rm_col[1];		/* Flexible array of I/O columns */
 } raidz_map_t;

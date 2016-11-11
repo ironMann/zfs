@@ -45,7 +45,7 @@ struct raidz_map * vdev_raidz_map_alloc(struct zio *, uint64_t, uint64_t,
 void		vdev_raidz_map_alloc_parity(struct raidz_map *);
 void		vdev_raidz_map_free(struct raidz_map *);
 void 		vdev_raidz_generate_parity(struct raidz_map *);
-int 		vdev_raidz_reconstruct(struct raidz_map *, const int *, int);
+int 		vdev_raidz_reconstruct(struct raidz_map *, const boolean_t *, const int *, const int);
 
 /*
  * vdev_raidz_math interface
@@ -55,7 +55,7 @@ void			vdev_raidz_math_fini(void);
 struct raidz_impl_ops *	vdev_raidz_math_get_ops(void);
 int			vdev_raidz_math_generate(struct raidz_map *);
 int			vdev_raidz_math_reconstruct(struct raidz_map *,
-			    const int *, const int *, const int);
+			    const boolean_t *, const int *, const int);
 int			vdev_raidz_impl_set(const char *);
 
 #ifdef	__cplusplus
