@@ -178,24 +178,23 @@ int zfs_abd_scatter_enabled = B_TRUE;
 static kstat_t *abd_ksp;
 static struct address_space *abd_mapping;
 
-static struct page *
-abd_alloc_chunk(void)
+static const gfp_t high_order_gfp = (GFP_HIGHUSER | __GFP_NOWARN |
+    __GFP_NORETRY) & ~__GFP_RECLAIM;
+static const gfp_t low_order_gfp = (GFP_HIGHUSER | __GFP_NOWARN);
+
+static inline struct page *
+abd_alloc_chunk(unsigned order)
 {
-	struct page *page;
+	gfp_t gfp = order > (MAX_ORDER / 2) ? high_order_gfp : low_order_gfp;
 
-	while ((page = page_cache_alloc(abd_mapping)) == NULL)
-		schedule_timeout_interruptible(1);
-
-	__inc_zone_page_state(page, NR_FILE_PAGES);
-
-	return (page);
+	/* __GFP_COMP: Compound page metadata for deallocation */
+	return (alloc_pages(gfp | __GFP_COMP, order));
 }
 
 static void
-abd_free_chunk(struct page *page)
+abd_free_chunk(struct page *page, unsigned order)
 {
-	__free_page(page);
-	__dec_zone_page_state(page, NR_FILE_PAGES);
+	__free_pages(page, order);
 }
 
 void
@@ -233,9 +232,9 @@ abd_fini(void)
 #endif
 struct page;
 #define	kpm_enable			1
-#define	abd_alloc_chunk() \
-	((struct page *) umem_alloc_aligned(PAGESIZE, 64, KM_SLEEP))
-#define	abd_free_chunk(chunk)		umem_free(chunk, PAGESIZE)
+#define	abd_alloc_chunk(o) \
+	((struct page *) umem_alloc_aligned(PAGESIZE << (o), 64, KM_SLEEP))
+#define	abd_free_chunk(chunk, o)	umem_free(chunk, PAGESIZE << (o))
 #define	zfs_kmap_atomic(chunk, km)	((void *)chunk)
 #define	zfs_kunmap_atomic(addr, km)	do { (void)(addr); } while (0)
 #define	local_irq_save(flags)		do { (void)(flags); } while (0)
@@ -352,34 +351,74 @@ abd_free_struct(abd_t *abd)
 	ABDSTAT_INCR(abdstat_struct_size, -size);
 }
 
+#ifdef _KERNEL
+static void
+abd_alloc_pages_kernel(abd_t *abd, size_t size)
+{
+	unsigned nr_pages = abd_chunkcnt_for_bytes(size), alloc_pages = 0;
+	struct page *page;
+	ssize_t size_remaining = P2ROUNDUP(size, PAGESIZE);
+	unsigned max_order = MAX_ORDER - 1;
+	int i;
+
+	struct scatterlist *sg;
+	struct sg_table table;
+
+	while (sg_alloc_table(&table, nr_pages, GFP_NOIO))
+		schedule_timeout_interruptible(1);
+
+	sg = table.sgl;
+
+	sg_init_table(sg, nr_pages);
+
+	while (size_remaining > 0) {
+		unsigned order = highbit64(size_remaining / PAGESIZE) - 1;
+		order = MIN(order, max_order);
+
+		page = abd_alloc_chunk(order);
+		if (unlikely(!page)) {
+			if (max_order == 0)
+				schedule_timeout_interruptible(1);
+			else
+				max_order = MAX(0, order - 1);
+			continue;
+		}
+
+		for (i = 0; i < (1 << order); i++) {
+			sg_set_page(sg, nth_page(page, i), PAGESIZE, 0);
+			sg = sg_next(sg);
+			alloc_pages++;
+		}
+
+		size_remaining -= (PAGESIZE << order);
+		max_order = MAX_ORDER - 1;
+	}
+
+	ASSERT3U(nr_pages, ==, alloc_pages);
+
+	ABD_SCATTER(abd).abd_sgl = table.sgl;
+	ABD_SCATTER(abd).abd_nents = nr_pages;
+}
+#endif
+
 static void
 abd_alloc_pages(abd_t *abd, size_t size)
 {
+#ifdef _KERNEL
+	abd_alloc_pages_kernel(abd, size);
+#else
 	int i, n = abd_chunkcnt_for_bytes(size);
 	struct scatterlist *sg;
-#ifdef _KERNEL
-	struct sg_table table;
-	int ret;
-	gfp_t gfp = kmem_flags_convert(KM_SLEEP);
-
-	while ((ret = sg_alloc_table(&table, n, gfp))) {
-		VERIFY3S(ret, ==, -ENOMEM);
-		schedule_timeout_interruptible(1);
-	}
-
-	ASSERT3U(table.nents, ==, n);
-	ABD_SCATTER(abd).abd_sgl = table.sgl;
-#else
 	ABD_SCATTER(abd).abd_sgl = vmem_alloc(n * sizeof (struct scatterlist),
 	    KM_SLEEP);
 	sg_init_table(ABD_SCATTER(abd).abd_sgl, n);
-#endif
-	ABD_SCATTER(abd).abd_nents = n;
 
 	abd_for_each_sg(abd, sg, n, i) {
-		struct page *p = abd_alloc_chunk();
+		struct page *p = abd_alloc_chunk(0);
 		sg_set_page(sg, p, PAGESIZE, 0);
 	}
+	ABD_SCATTER(abd).abd_nents = n;
+#endif
 }
 
 /*
@@ -420,22 +459,37 @@ abd_alloc(size_t size, boolean_t is_metadata)
 static void
 abd_free_pages(abd_t *abd)
 {
-	int i, j, n = ABD_SCATTER(abd).abd_nents;
+	int i, n = ABD_SCATTER(abd).abd_nents;
 	struct scatterlist *sg;
 #ifdef _KERNEL
 	struct sg_table table;
-#endif
+	unsigned skip = 0;
+	unsigned order;
 	abd_for_each_sg(abd, sg, n, i) {
-		for (j = 0; j < sg->length; j += PAGESIZE) {
-			struct page *p = nth_page(sg_page(sg), j>>PAGE_SHIFT);
-			abd_free_chunk(p);
+		/* Skip pages of deallocated higher order page */
+		if (skip > 0) {
+			skip--;
+			continue;
 		}
+
+		order = compound_order(sg_page(sg));
+		skip = (1U << order) - 1;
+
+		abd_free_chunk(sg_page(sg), order);
 	}
-#ifdef _KERNEL
+
 	table.sgl = ABD_SCATTER(abd).abd_sgl;
 	table.nents = table.orig_nents = n;
 	sg_free_table(&table);
 #else
+	int j;
+	abd_for_each_sg(abd, sg, n, i) {
+		for (j = 0; j < sg->length; j += PAGESIZE) {
+			struct page *p = nth_page(sg_page(sg), j>>PAGE_SHIFT);
+			abd_free_chunk(p, 0);
+		}
+	}
+
 	vmem_free(ABD_SCATTER(abd).abd_sgl, n * sizeof (struct scatterlist));
 #endif
 }
