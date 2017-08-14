@@ -39,6 +39,7 @@ $(MODULE)-objs += dsl_scan.o
 $(MODULE)-objs += dsl_synctask.o
 $(MODULE)-objs += edonr_zfs.o
 $(MODULE)-objs += fm.o
+$(MODULE)-objs += flat_range_tree.o
 $(MODULE)-objs += gzip.o
 $(MODULE)-objs += lzjb.o
 $(MODULE)-objs += lz4.o
