@@ -35,6 +35,7 @@
 #include <sys/dkio.h>
 #include <sys/uberblock_impl.h>
 #include <sys/zfs_ratelimit.h>
+#include <sys/flat_range_tree.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -201,7 +202,7 @@ struct vdev {
 	/*
 	 * Leaf vdev state.
 	 */
-	range_tree_t	*vdev_dtl[DTL_TYPES]; /* dirty time logs	*/
+	flat_range_tree_t	*vdev_dtl[DTL_TYPES]; /* dirty time logs	*/
 	space_map_t	*vdev_dtl_sm;	/* dirty time log space map	*/
 	txg_node_t	vdev_dtl_node;	/* per-txg dirty DTL linkage	*/
 	uint64_t	vdev_dtl_object; /* DTL object			*/

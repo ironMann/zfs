@@ -33,7 +33,7 @@
 #include <sys/dmu_objset.h>
 #include <sys/dsl_dataset.h>
 #include <sys/spa.h>
-#include <sys/range_tree.h>
+#include <sys/flat_range_tree.h>
 #include <sys/zfeature.h>
 
 static void
@@ -628,7 +628,7 @@ dnode_sync(dnode_t *dn, dmu_tx_t *tx)
 		    dn->dn_maxblkid == 0 || list_head(list) != NULL ||
 		    dn->dn_next_blksz[txgoff] >> SPA_MINBLOCKSHIFT ==
 		    dnp->dn_datablkszsec ||
-		    range_tree_space(dn->dn_free_ranges[txgoff]) != 0);
+		    flat_range_tree_space(dn->dn_free_ranges[txgoff]) != 0);
 		dnp->dn_datablkszsec =
 		    dn->dn_next_blksz[txgoff] >> SPA_MINBLOCKSHIFT;
 		dn->dn_next_blksz[txgoff] = 0;
@@ -691,9 +691,9 @@ dnode_sync(dnode_t *dn, dmu_tx_t *tx)
 		dsfra.dsfra_dnode = dn;
 		dsfra.dsfra_tx = tx;
 		mutex_enter(&dn->dn_mtx);
-		range_tree_vacate(dn->dn_free_ranges[txgoff],
+		flat_range_tree_vacate(dn->dn_free_ranges[txgoff],
 		    dnode_sync_free_range, &dsfra);
-		range_tree_destroy(dn->dn_free_ranges[txgoff]);
+		flat_range_tree_destroy(dn->dn_free_ranges[txgoff]);
 		dn->dn_free_ranges[txgoff] = NULL;
 		mutex_exit(&dn->dn_mtx);
 	}

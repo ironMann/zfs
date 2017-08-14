@@ -32,6 +32,7 @@
 
 #include <sys/avl.h>
 #include <sys/range_tree.h>
+#include <sys/flat_range_tree.h>
 #include <sys/dmu.h>
 
 #ifdef	__cplusplus
@@ -133,10 +134,10 @@ typedef enum {
 	SM_FREE
 } maptype_t;
 
-int space_map_load(space_map_t *sm, range_tree_t *rt, maptype_t maptype);
+int space_map_load(space_map_t *sm, flat_range_tree_t *rt, maptype_t maptype);
 
 void space_map_histogram_clear(space_map_t *sm);
-void space_map_histogram_add(space_map_t *sm, range_tree_t *rt,
+void space_map_histogram_add(space_map_t *sm, flat_range_tree_t *rt,
     dmu_tx_t *tx);
 
 void space_map_update(space_map_t *sm);
@@ -145,7 +146,7 @@ uint64_t space_map_object(space_map_t *sm);
 uint64_t space_map_allocated(space_map_t *sm);
 uint64_t space_map_length(space_map_t *sm);
 
-void space_map_write(space_map_t *sm, range_tree_t *rt, maptype_t maptype,
+void space_map_write(space_map_t *sm, flat_range_tree_t *rt, maptype_t maptype,
     dmu_tx_t *tx);
 void space_map_truncate(space_map_t *sm, dmu_tx_t *tx);
 uint64_t space_map_alloc(objset_t *os, dmu_tx_t *tx);

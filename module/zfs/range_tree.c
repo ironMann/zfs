@@ -33,6 +33,7 @@
 #include <sys/zio.h>
 #include <sys/range_tree.h>
 
+
 kmem_cache_t *range_seg_cache;
 
 void
@@ -49,6 +50,7 @@ range_tree_fini(void)
 	kmem_cache_destroy(range_seg_cache);
 	range_seg_cache = NULL;
 }
+
 
 void
 range_tree_stat_verify(range_tree_t *rt)
@@ -74,6 +76,7 @@ range_tree_stat_verify(range_tree_t *rt)
 		VERIFY3U(hist[i], ==, rt->rt_histogram[i]);
 	}
 }
+
 
 static void
 range_tree_stat_incr(range_tree_t *rt, range_seg_t *rs)
@@ -105,6 +108,7 @@ range_tree_stat_decr(range_tree_t *rt, range_seg_t *rs)
 	rt->rt_histogram[idx]--;
 }
 
+
 /*
  * NOTE: caller is responsible for all locking.
  */
@@ -114,10 +118,22 @@ range_tree_seg_compare(const void *x1, const void *x2)
 	const range_seg_t *r1 = (const range_seg_t *)x1;
 	const range_seg_t *r2 = (const range_seg_t *)x2;
 
-	ASSERT3U(r1->rs_start, <=, r1->rs_end);
-	ASSERT3U(r2->rs_start, <=, r2->rs_end);
+	// ASSERT3U(r1->rs_start, <=, r1->rs_end);
+	// ASSERT3U(r2->rs_start, <=, r2->rs_end);
 
-	return ((r1->rs_start >= r2->rs_end) - (r1->rs_end <= r2->rs_start));
+	// return ((r1->rs_start >= r2->rs_end) - (r1->rs_end <= r2->rs_start));
+
+	if (r1->rs_start < r2->rs_start) {
+ 		if (r1->rs_end > r2->rs_start)
+ 			return (0);
+ 		return (-1);
+ 	}
+ 	if (r1->rs_start > r2->rs_start) {
+ 		if (r1->rs_start < r2->rs_end)
+ 			return (0);
+ 		return (1);
+ 	}
+ 	return (0);
 }
 
 range_tree_t *
@@ -152,7 +168,8 @@ range_tree_destroy(range_tree_t *rt)
 	kmem_free(rt, sizeof (*rt));
 }
 
-void
+
+int
 range_tree_add(void *arg, uint64_t start, uint64_t size)
 {
 	range_tree_t *rt = arg;
@@ -168,11 +185,14 @@ range_tree_add(void *arg, uint64_t start, uint64_t size)
 	rsearch.rs_end = end;
 	rs = avl_find(&rt->rt_root, &rsearch, &where);
 
-	if (rs != NULL && rs->rs_start <= start && rs->rs_end >= end) {
-		zfs_panic_recover("zfs: allocating allocated segment"
-		    "(offset=%llu size=%llu)\n",
-		    (longlong_t)start, (longlong_t)size);
-		return;
+	if (rs != NULL &&
+
+		(rs->rs_end > start) && (rs->rs_start < end)) {
+		// rs->rs_start <= start && rs->rs_end >= end) {
+		// zfs_panic_recover("zfs: allocating allocated segment"
+		    // "(offset=%llu size=%llu)\n",
+		    // (longlong_t)start, (longlong_t)size);
+		return 1;
 	}
 
 	/* Make sure we don't overlap with either of our neighbors */
@@ -225,9 +245,12 @@ range_tree_add(void *arg, uint64_t start, uint64_t size)
 
 	range_tree_stat_incr(rt, rs);
 	rt->rt_space += size;
+	return 0;
 }
 
-void
+#define	SEG_CONTAIN(a, b)	(((a)->rs_start >= (b)->rs_start) && ((a)->rs_end <= (b)->rs_end))
+
+int
 range_tree_remove(void *arg, uint64_t start, uint64_t size)
 {
 	range_tree_t *rt = arg;
@@ -238,7 +261,7 @@ range_tree_remove(void *arg, uint64_t start, uint64_t size)
 
 	ASSERT(MUTEX_HELD(rt->rt_lock));
 	VERIFY3U(size, !=, 0);
-	VERIFY3U(size, <=, rt->rt_space);
+	// VERIFY3U(size, <=, rt->rt_space);
 
 	rsearch.rs_start = start;
 	rsearch.rs_end = end;
@@ -246,11 +269,15 @@ range_tree_remove(void *arg, uint64_t start, uint64_t size)
 
 	/* Make sure we completely overlap with someone */
 	if (rs == NULL) {
-		zfs_panic_recover("zfs: freeing free segment "
-		    "(offset=%llu size=%llu)",
-		    (longlong_t)start, (longlong_t)size);
-		return;
+		// zfs_panic_recover("zfs: freeing free segment "
+		    // "(offset=%llu size=%llu)",
+		    // (longlong_t)start, (longlong_t)size);
+		return 1;
+	} else if (!((start >= (rs)->rs_start) && (end <= (rs)->rs_end))) {
+		// partly overlap
+		return 2;
 	}
+
 	VERIFY3U(rs->rs_start, <=, start);
 	VERIFY3U(rs->rs_end, >=, end);
 
@@ -291,7 +318,10 @@ range_tree_remove(void *arg, uint64_t start, uint64_t size)
 	}
 
 	rt->rt_space -= size;
+	return 0;
 }
+
+
 
 static range_seg_t *
 range_tree_find_impl(range_tree_t *rt, uint64_t start, uint64_t size)
@@ -339,6 +369,7 @@ range_tree_contains(range_tree_t *rt, uint64_t start, uint64_t size)
  * Ensure that this range is not in the tree, regardless of whether
  * it is currently in the tree.
  */
+
 void
 range_tree_clear(range_tree_t *rt, uint64_t start, uint64_t size)
 {
@@ -402,3 +433,5 @@ range_tree_space(range_tree_t *rt)
 {
 	return (rt->rt_space);
 }
+
+

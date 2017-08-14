@@ -27,8 +27,11 @@
  */
 
 #include <sys/zfs_context.h>
-#include <sys/range_tree.h>
+// #include <sys/range_tree.h>
+#include <sys/flat_range_tree.h>
+#include <sys/avl.h>
 #include <sys/space_reftree.h>
+
 
 /*
  * Space reference trees.
@@ -106,6 +109,7 @@ space_reftree_add_seg(avl_tree_t *t, uint64_t start, uint64_t end,
 /*
  * Convert (or add) a range tree into a reference tree.
  */
+#if 0
 void
 space_reftree_add_map(avl_tree_t *t, range_tree_t *rt, int64_t refcnt)
 {
@@ -116,11 +120,27 @@ space_reftree_add_map(avl_tree_t *t, range_tree_t *rt, int64_t refcnt)
 	for (rs = avl_first(&rt->rt_root); rs; rs = AVL_NEXT(&rt->rt_root, rs))
 		space_reftree_add_seg(t, rs->rs_start, rs->rs_end, refcnt);
 }
+#endif
+
+/*
+ * Convert (or add) a range tree into a reference tree.
+ */
+void
+space_reftree_add_flat_map(avl_tree_t *t, flat_range_tree_t *frt, int64_t refcnt)
+{
+	flat_range_seg_t *frs;
+
+	ASSERT(MUTEX_HELD(frt->frt_lock));
+
+	for (frs = flat_range_tree_seg_first(frt); frs; frs = flat_range_tree_seg_next(frt, frs))
+		space_reftree_add_seg(t, frs->frs_start, frs->frs_end, refcnt);
+}
 
 /*
  * Convert a reference tree into a range tree.  The range tree will contain
  * all members of the reference tree for which refcnt >= minref.
  */
+#if 0
 void
 space_reftree_generate_map(avl_tree_t *t, range_tree_t *rt, int64_t minref)
 {
@@ -143,7 +163,39 @@ space_reftree_generate_map(avl_tree_t *t, range_tree_t *rt, int64_t minref)
 				uint64_t end = sr->sr_offset;
 				ASSERT(start <= end);
 				if (end > start)
-					range_tree_add(rt, start, end - start);
+					;// range_tree_add(rt, start, end - start);
+				start = -1ULL;
+			}
+		}
+	}
+	ASSERT(refcnt == 0);
+	ASSERT(start == -1ULL);
+}
+#endif
+
+void
+space_reftree_generate_flat_map(avl_tree_t *t, flat_range_tree_t *frt, int64_t minref)
+{
+	uint64_t start = -1ULL;
+	int64_t refcnt = 0;
+	space_ref_t *sr;
+
+	ASSERT(MUTEX_HELD(frt->frt_lock));
+
+	flat_range_tree_vacate(frt, NULL, NULL);
+
+	for (sr = avl_first(t); sr != NULL; sr = AVL_NEXT(t, sr)) {
+		refcnt += sr->sr_refcnt;
+		if (refcnt >= minref) {
+			if (start == -1ULL) {
+				start = sr->sr_offset;
+			}
+		} else {
+			if (start != -1ULL) {
+				uint64_t end = sr->sr_offset;
+				ASSERT(start <= end);
+				if (end > start)
+					flat_range_tree_add(frt, start, end - start);
 				start = -1ULL;
 			}
 		}

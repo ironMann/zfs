@@ -36,7 +36,7 @@
 #include <sys/spa.h>
 #include <sys/zio.h>
 #include <sys/dmu_zfetch.h>
-#include <sys/range_tree.h>
+#include <sys/flat_range_tree.h>
 #include <sys/trace_dnode.h>
 
 static kmem_cache_t *dnode_cache;
@@ -1840,10 +1840,10 @@ done:
 	int txgoff = tx->tx_txg & TXG_MASK;
 	if (dn->dn_free_ranges[txgoff] == NULL) {
 		dn->dn_free_ranges[txgoff] =
-		    range_tree_create(NULL, NULL, &dn->dn_mtx);
+		    flat_range_tree_create(NULL, NULL, &dn->dn_mtx);
 	}
-	range_tree_clear(dn->dn_free_ranges[txgoff], blkid, nblks);
-	range_tree_add(dn->dn_free_ranges[txgoff], blkid, nblks);
+	flat_range_tree_clear(dn->dn_free_ranges[txgoff], blkid, nblks);
+	flat_range_tree_add(dn->dn_free_ranges[txgoff], blkid, nblks);
 	}
 	dprintf_dnode(dn, "blkid=%llu nblks=%llu txg=%llu\n",
 	    blkid, nblks, tx->tx_txg);
@@ -1896,7 +1896,7 @@ dnode_block_freed(dnode_t *dn, uint64_t blkid)
 	mutex_enter(&dn->dn_mtx);
 	for (i = 0; i < TXG_SIZE; i++) {
 		if (dn->dn_free_ranges[i] != NULL &&
-		    range_tree_contains(dn->dn_free_ranges[i], blkid, 1))
+		    flat_range_tree_contains(dn->dn_free_ranges[i], blkid, 1))
 			break;
 	}
 	mutex_exit(&dn->dn_mtx);

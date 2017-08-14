@@ -368,7 +368,7 @@ vdev_alloc_common(spa_t *spa, uint_t id, uint64_t guid, vdev_ops_t *ops)
 	mutex_init(&vd->vdev_queue_lock, NULL, MUTEX_DEFAULT, NULL);
 
 	for (t = 0; t < DTL_TYPES; t++) {
-		vd->vdev_dtl[t] = range_tree_create(NULL, NULL,
+		vd->vdev_dtl[t] = flat_range_tree_create(NULL, NULL,
 		    &vd->vdev_dtl_lock);
 	}
 	txg_list_create(&vd->vdev_ms_list, spa,
@@ -721,8 +721,8 @@ vdev_free(vdev_t *vd)
 	mutex_enter(&vd->vdev_dtl_lock);
 	space_map_close(vd->vdev_dtl_sm);
 	for (t = 0; t < DTL_TYPES; t++) {
-		range_tree_vacate(vd->vdev_dtl[t], NULL, NULL);
-		range_tree_destroy(vd->vdev_dtl[t]);
+		flat_range_tree_vacate(vd->vdev_dtl[t], NULL, NULL);
+		flat_range_tree_destroy(vd->vdev_dtl[t]);
 	}
 	mutex_exit(&vd->vdev_dtl_lock);
 
@@ -1798,31 +1798,31 @@ vdev_dirty_leaves(vdev_t *vd, int flags, uint64_t txg)
 void
 vdev_dtl_dirty(vdev_t *vd, vdev_dtl_type_t t, uint64_t txg, uint64_t size)
 {
-	range_tree_t *rt = vd->vdev_dtl[t];
+	flat_range_tree_t *frt = vd->vdev_dtl[t];
 
 	ASSERT(t < DTL_TYPES);
 	ASSERT(vd != vd->vdev_spa->spa_root_vdev);
 	ASSERT(spa_writeable(vd->vdev_spa));
 
-	mutex_enter(rt->rt_lock);
-	if (!range_tree_contains(rt, txg, size))
-		range_tree_add(rt, txg, size);
-	mutex_exit(rt->rt_lock);
+	mutex_enter(frt->frt_lock);
+	if (!flat_range_tree_contains(frt, txg, size))
+		flat_range_tree_add(frt, txg, size);
+	mutex_exit(frt->frt_lock);
 }
 
 boolean_t
 vdev_dtl_contains(vdev_t *vd, vdev_dtl_type_t t, uint64_t txg, uint64_t size)
 {
-	range_tree_t *rt = vd->vdev_dtl[t];
+	flat_range_tree_t *frt = vd->vdev_dtl[t];
 	boolean_t dirty = B_FALSE;
 
 	ASSERT(t < DTL_TYPES);
 	ASSERT(vd != vd->vdev_spa->spa_root_vdev);
 
-	mutex_enter(rt->rt_lock);
-	if (range_tree_space(rt) != 0)
-		dirty = range_tree_contains(rt, txg, size);
-	mutex_exit(rt->rt_lock);
+	mutex_enter(frt->frt_lock);
+	if (flat_range_tree_space(frt) != 0)
+		dirty = flat_range_tree_contains(frt, txg, size);
+	mutex_exit(frt->frt_lock);
 
 	return (dirty);
 }
@@ -1830,12 +1830,12 @@ vdev_dtl_contains(vdev_t *vd, vdev_dtl_type_t t, uint64_t txg, uint64_t size)
 boolean_t
 vdev_dtl_empty(vdev_t *vd, vdev_dtl_type_t t)
 {
-	range_tree_t *rt = vd->vdev_dtl[t];
+	flat_range_tree_t *frt = vd->vdev_dtl[t];
 	boolean_t empty;
 
-	mutex_enter(rt->rt_lock);
-	empty = (range_tree_space(rt) == 0);
-	mutex_exit(rt->rt_lock);
+	mutex_enter(frt->frt_lock);
+	empty = (flat_range_tree_space(frt) == 0);
+	mutex_exit(frt->frt_lock);
 
 	return (empty);
 }
@@ -1861,14 +1861,15 @@ vdev_dtl_need_resilver(vdev_t *vd, uint64_t offset, size_t psize)
 static uint64_t
 vdev_dtl_min(vdev_t *vd)
 {
-	range_seg_t *rs;
+	flat_range_seg_t *frs;
 
 	ASSERT(MUTEX_HELD(&vd->vdev_dtl_lock));
-	ASSERT3U(range_tree_space(vd->vdev_dtl[DTL_MISSING]), !=, 0);
+	ASSERT3U(flat_range_tree_space(vd->vdev_dtl[DTL_MISSING]), !=, 0);
 	ASSERT0(vd->vdev_children);
 
-	rs = avl_first(&vd->vdev_dtl[DTL_MISSING]->rt_root);
-	return (rs->rs_start - 1);
+	frs = flat_range_tree_seg_first(vd->vdev_dtl[DTL_MISSING]);
+	VERIFY0(frs);
+	return (frs->frs_start - 1);
 }
 
 /*
@@ -1877,14 +1878,15 @@ vdev_dtl_min(vdev_t *vd)
 static uint64_t
 vdev_dtl_max(vdev_t *vd)
 {
-	range_seg_t *rs;
+	flat_range_seg_t *frs;
 
 	ASSERT(MUTEX_HELD(&vd->vdev_dtl_lock));
-	ASSERT3U(range_tree_space(vd->vdev_dtl[DTL_MISSING]), !=, 0);
+	ASSERT3U(flat_range_tree_space(vd->vdev_dtl[DTL_MISSING]), !=, 0);
 	ASSERT0(vd->vdev_children);
 
-	rs = avl_last(&vd->vdev_dtl[DTL_MISSING]->rt_root);
-	return (rs->rs_end);
+	frs = flat_range_tree_seg_last(vd->vdev_dtl[DTL_MISSING]);
+	VERIFY0(frs);
+	return (frs->frs_end);
 }
 
 /*
@@ -1908,7 +1910,7 @@ vdev_dtl_should_excise(vdev_t *vd)
 		return (B_FALSE);
 
 	if (vd->vdev_resilver_txg == 0 ||
-	    range_tree_space(vd->vdev_dtl[DTL_MISSING]) == 0)
+	    flat_range_tree_space(vd->vdev_dtl[DTL_MISSING]) == 0)
 		return (B_TRUE);
 
 	/*
@@ -1979,26 +1981,26 @@ vdev_dtl_reassess(vdev_t *vd, uint64_t txg, uint64_t scrub_txg, int scrub_done)
 			 * the reference tree into the new DTL_MISSING map.
 			 */
 			space_reftree_create(&reftree);
-			space_reftree_add_map(&reftree,
+			space_reftree_add_flat_map(&reftree,
 			    vd->vdev_dtl[DTL_MISSING], 1);
 			space_reftree_add_seg(&reftree, 0, scrub_txg, -1);
-			space_reftree_add_map(&reftree,
+			space_reftree_add_flat_map(&reftree,
 			    vd->vdev_dtl[DTL_SCRUB], 2);
-			space_reftree_generate_map(&reftree,
+			space_reftree_generate_flat_map(&reftree,
 			    vd->vdev_dtl[DTL_MISSING], 1);
 			space_reftree_destroy(&reftree);
 		}
-		range_tree_vacate(vd->vdev_dtl[DTL_PARTIAL], NULL, NULL);
-		range_tree_walk(vd->vdev_dtl[DTL_MISSING],
-		    range_tree_add, vd->vdev_dtl[DTL_PARTIAL]);
+		flat_range_tree_vacate(vd->vdev_dtl[DTL_PARTIAL], NULL, NULL);
+		flat_range_tree_walk(vd->vdev_dtl[DTL_MISSING],
+		    flat_range_tree_add, vd->vdev_dtl[DTL_PARTIAL]);
 		if (scrub_done)
-			range_tree_vacate(vd->vdev_dtl[DTL_SCRUB], NULL, NULL);
-		range_tree_vacate(vd->vdev_dtl[DTL_OUTAGE], NULL, NULL);
+			flat_range_tree_vacate(vd->vdev_dtl[DTL_SCRUB], NULL, NULL);
+		flat_range_tree_vacate(vd->vdev_dtl[DTL_OUTAGE], NULL, NULL);
 		if (!vdev_readable(vd))
-			range_tree_add(vd->vdev_dtl[DTL_OUTAGE], 0, -1ULL);
+			flat_range_tree_add(vd->vdev_dtl[DTL_OUTAGE], 0, -1ULL);
 		else
-			range_tree_walk(vd->vdev_dtl[DTL_MISSING],
-			    range_tree_add, vd->vdev_dtl[DTL_OUTAGE]);
+			flat_range_tree_walk(vd->vdev_dtl[DTL_MISSING],
+			    flat_range_tree_add, vd->vdev_dtl[DTL_OUTAGE]);
 
 		/*
 		 * If the vdev was resilvering and no longer has any
@@ -2006,8 +2008,8 @@ vdev_dtl_reassess(vdev_t *vd, uint64_t txg, uint64_t scrub_txg, int scrub_done)
 		 * the top level so that we persist the change.
 		 */
 		if (vd->vdev_resilver_txg != 0 &&
-		    range_tree_space(vd->vdev_dtl[DTL_MISSING]) == 0 &&
-		    range_tree_space(vd->vdev_dtl[DTL_OUTAGE]) == 0) {
+		    flat_range_tree_space(vd->vdev_dtl[DTL_MISSING]) == 0 &&
+		    flat_range_tree_space(vd->vdev_dtl[DTL_OUTAGE]) == 0) {
 			vd->vdev_resilver_txg = 0;
 			vdev_config_dirty(vd->vdev_top);
 		}
@@ -2037,10 +2039,10 @@ vdev_dtl_reassess(vdev_t *vd, uint64_t txg, uint64_t scrub_txg, int scrub_done)
 		for (c = 0; c < vd->vdev_children; c++) {
 			vdev_t *cvd = vd->vdev_child[c];
 			mutex_enter(&cvd->vdev_dtl_lock);
-			space_reftree_add_map(&reftree, cvd->vdev_dtl[s], 1);
+			space_reftree_add_flat_map(&reftree, cvd->vdev_dtl[s], 1);
 			mutex_exit(&cvd->vdev_dtl_lock);
 		}
-		space_reftree_generate_map(&reftree, vd->vdev_dtl[t], minref);
+		space_reftree_generate_flat_map(&reftree, vd->vdev_dtl[t], minref);
 		space_reftree_destroy(&reftree);
 	}
 	mutex_exit(&vd->vdev_dtl_lock);
@@ -2136,9 +2138,9 @@ void
 vdev_dtl_sync(vdev_t *vd, uint64_t txg)
 {
 	spa_t *spa = vd->vdev_spa;
-	range_tree_t *rt = vd->vdev_dtl[DTL_MISSING];
+	flat_range_tree_t *rt = vd->vdev_dtl[DTL_MISSING];
 	objset_t *mos = spa->spa_meta_objset;
-	range_tree_t *rtsync;
+	flat_range_tree_t *rtsync;
 	kmutex_t rtlock;
 	dmu_tx_t *tx;
 	uint64_t object = space_map_object(vd->vdev_dtl_sm);
@@ -2183,19 +2185,19 @@ vdev_dtl_sync(vdev_t *vd, uint64_t txg)
 
 	mutex_init(&rtlock, NULL, MUTEX_DEFAULT, NULL);
 
-	rtsync = range_tree_create(NULL, NULL, &rtlock);
+	rtsync = flat_range_tree_create(NULL, NULL, &rtlock);
 
 	mutex_enter(&rtlock);
 
 	mutex_enter(&vd->vdev_dtl_lock);
-	range_tree_walk(rt, range_tree_add, rtsync);
+	flat_range_tree_walk(rt, flat_range_tree_add, rtsync);
 	mutex_exit(&vd->vdev_dtl_lock);
 
 	space_map_truncate(vd->vdev_dtl_sm, tx);
 	space_map_write(vd->vdev_dtl_sm, rtsync, SM_ALLOC, tx);
-	range_tree_vacate(rtsync, NULL, NULL);
+	flat_range_tree_vacate(rtsync, NULL, NULL);
 
-	range_tree_destroy(rtsync);
+	flat_range_tree_destroy(rtsync);
 
 	mutex_exit(&rtlock);
 	mutex_destroy(&rtlock);
@@ -2265,7 +2267,7 @@ vdev_resilver_needed(vdev_t *vd, uint64_t *minp, uint64_t *maxp)
 
 	if (vd->vdev_children == 0) {
 		mutex_enter(&vd->vdev_dtl_lock);
-		if (range_tree_space(vd->vdev_dtl[DTL_MISSING]) != 0 &&
+		if (flat_range_tree_space(vd->vdev_dtl[DTL_MISSING]) != 0 &&
 		    vdev_writeable(vd)) {
 
 			thismin = vdev_dtl_min(vd);
@@ -2405,7 +2407,7 @@ vdev_remove(vdev_t *vd, uint64_t txg)
 
 		metaslab_group_histogram_verify(mg);
 		metaslab_class_histogram_verify(mg->mg_class);
-		for (i = 0; i < RANGE_TREE_HISTOGRAM_SIZE; i++)
+		for (i = 0; i < FLAT_RANGE_TREE_HIST_SIZE; i++)
 			ASSERT0(mg->mg_histogram[i]);
 
 	}

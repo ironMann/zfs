@@ -53,7 +53,7 @@ int space_map_blksz = (1 << 12);
  * The caller must be OK with this.
  */
 int
-space_map_load(space_map_t *sm, range_tree_t *rt, maptype_t maptype)
+space_map_load(space_map_t *sm, flat_range_tree_t *frt, maptype_t maptype)
 {
 	uint64_t *entry, *entry_map, *entry_map_end;
 	uint64_t bufsize, size, offset, end, space;
@@ -64,10 +64,10 @@ space_map_load(space_map_t *sm, range_tree_t *rt, maptype_t maptype)
 	end = space_map_length(sm);
 	space = space_map_allocated(sm);
 
-	VERIFY0(range_tree_space(rt));
+	VERIFY0(flat_range_tree_space(frt));
 
 	if (maptype == SM_FREE) {
-		range_tree_add(rt, sm->sm_start, sm->sm_size);
+		flat_range_tree_add(frt, sm->sm_start, sm->sm_size);
 		space = sm->sm_size - space;
 	}
 
@@ -114,19 +114,19 @@ space_map_load(space_map_t *sm, range_tree_t *rt, maptype_t maptype)
 			VERIFY3U(offset, >=, sm->sm_start);
 			VERIFY3U(offset + size, <=, sm->sm_start + sm->sm_size);
 			if (SM_TYPE_DECODE(e) == maptype) {
-				VERIFY3U(range_tree_space(rt) + size, <=,
+				VERIFY3U(flat_range_tree_space(frt) + size, <=,
 				    sm->sm_size);
-				range_tree_add(rt, offset, size);
+				flat_range_tree_add(frt, offset, size);
 			} else {
-				range_tree_remove(rt, offset, size);
+				flat_range_tree_remove(frt, offset, size);
 			}
 		}
 	}
 
 	if (error == 0)
-		VERIFY3U(range_tree_space(rt), ==, space);
+		VERIFY3U(flat_range_tree_space(frt), ==, space);
 	else
-		range_tree_vacate(rt, NULL, NULL);
+		flat_range_tree_vacate(frt, NULL, NULL);
 
 	vmem_free(entry_map, bufsize);
 	return (error);
@@ -142,7 +142,7 @@ space_map_histogram_clear(space_map_t *sm)
 }
 
 boolean_t
-space_map_histogram_verify(space_map_t *sm, range_tree_t *rt)
+space_map_histogram_verify(space_map_t *sm, flat_range_tree_t *frt)
 {
 	int i;
 
@@ -151,19 +151,19 @@ space_map_histogram_verify(space_map_t *sm, range_tree_t *rt)
 	 * ranges smaller than our sm_shift size.
 	 */
 	for (i = 0; i < sm->sm_shift; i++) {
-		if (rt->rt_histogram[i] != 0)
+		if (frt->frt_histogram[i] != 0)
 			return (B_FALSE);
 	}
 	return (B_TRUE);
 }
 
 void
-space_map_histogram_add(space_map_t *sm, range_tree_t *rt, dmu_tx_t *tx)
+space_map_histogram_add(space_map_t *sm, flat_range_tree_t *frt, dmu_tx_t *tx)
 {
 	int idx = 0;
 	int i;
 
-	ASSERT(MUTEX_HELD(rt->rt_lock));
+	ASSERT(MUTEX_HELD(frt->frt_lock));
 	ASSERT(dmu_tx_is_syncing(tx));
 	VERIFY3U(space_map_object(sm), !=, 0);
 
@@ -172,7 +172,7 @@ space_map_histogram_add(space_map_t *sm, range_tree_t *rt, dmu_tx_t *tx)
 
 	dmu_buf_will_dirty(sm->sm_dbuf, tx);
 
-	ASSERT(space_map_histogram_verify(sm, rt));
+	ASSERT(space_map_histogram_verify(sm, frt));
 	/*
 	 * Transfer the content of the range tree histogram to the space
 	 * map histogram. The space map histogram contains 32 buckets ranging
@@ -181,7 +181,7 @@ space_map_histogram_add(space_map_t *sm, range_tree_t *rt, dmu_tx_t *tx)
 	 * map only cares about allocatable blocks (minimum of sm_shift) we
 	 * can safely ignore all ranges in the range tree smaller than sm_shift.
 	 */
-	for (i = sm->sm_shift; i < RANGE_TREE_HISTOGRAM_SIZE; i++) {
+	for (i = sm->sm_shift; i < FLAT_RANGE_TREE_HIST_SIZE; i++) {
 
 		/*
 		 * Since the largest histogram bucket in the space map is
@@ -194,7 +194,7 @@ space_map_histogram_add(space_map_t *sm, range_tree_t *rt, dmu_tx_t *tx)
 		 */
 		ASSERT3U(i, >=, idx + sm->sm_shift);
 		sm->sm_phys->smp_histogram[idx] +=
-		    rt->rt_histogram[i] << (i - idx - sm->sm_shift);
+		    frt->frt_histogram[i] << (i - idx - sm->sm_shift);
 
 		/*
 		 * Increment the space map's index as long as we haven't
@@ -209,45 +209,53 @@ space_map_histogram_add(space_map_t *sm, range_tree_t *rt, dmu_tx_t *tx)
 	}
 }
 
-uint64_t
-space_map_entries(space_map_t *sm, range_tree_t *rt)
-{
-	avl_tree_t *t = &rt->rt_root;
-	range_seg_t *rs;
-	uint64_t size, entries;
+typedef struct map_entries_par {
+	uint64_t entries;
+	unsigned sm_shift;
+} map_entries_par_t;
 
+/*
+ * Traverse the range tree and calculate the number of space map
+ * entries that would be required to write out the range tree.
+ */
+static void
+space_map_entries_cb(void *arg, uint64_t start, uint64_t size)
+{
+	map_entries_par_t *p = arg;
+
+	size >>= p->sm_shift;
+	p->entries += howmany(size, SM_RUN_MAX);
+}
+
+uint64_t
+space_map_entries(space_map_t *sm, flat_range_tree_t *frt)
+{
 	/*
 	 * All space_maps always have a debug entry so account for it here.
 	 */
-	entries = 1;
+	map_entries_par_t par = { .entries = 1, .sm_shift = sm->sm_shift };
 
-	/*
-	 * Traverse the range tree and calculate the number of space map
-	 * entries that would be required to write out the range tree.
-	 */
-	for (rs = avl_first(t); rs != NULL; rs = AVL_NEXT(t, rs)) {
-		size = (rs->rs_end - rs->rs_start) >> sm->sm_shift;
-		entries += howmany(size, SM_RUN_MAX);
-	}
-	return (entries);
+	flat_range_tree_walk(frt, space_map_entries_cb, &par);
+
+	return (par.entries);
 }
 
 /*
  * Note: space_map_write() will drop sm_lock across dmu_write() calls.
  */
 void
-space_map_write(space_map_t *sm, range_tree_t *rt, maptype_t maptype,
+space_map_write(space_map_t *sm, flat_range_tree_t *frt, maptype_t maptype,
     dmu_tx_t *tx)
 {
 	objset_t *os = sm->sm_os;
 	spa_t *spa = dmu_objset_spa(os);
-	avl_tree_t *t = &rt->rt_root;
-	range_seg_t *rs;
+	// avl_tree_t *t = &rt->rt_root;
+	flat_range_seg_t *frs;
 	uint64_t size, total, rt_space, nodes;
 	uint64_t *entry, *entry_map, *entry_map_end;
 	uint64_t expected_entries, actual_entries = 1;
 
-	ASSERT(MUTEX_HELD(rt->rt_lock));
+	ASSERT(MUTEX_HELD(frt->frt_lock));
 	ASSERT(dsl_pool_sync_context(dmu_objset_pool(os)));
 	VERIFY3U(space_map_object(sm), !=, 0);
 	dmu_buf_will_dirty(sm->sm_dbuf, tx);
@@ -259,17 +267,17 @@ space_map_write(space_map_t *sm, range_tree_t *rt, maptype_t maptype,
 	 */
 	sm->sm_phys->smp_object = sm->sm_object;
 
-	if (range_tree_space(rt) == 0) {
+	if (flat_range_tree_space(frt) == 0) {
 		VERIFY3U(sm->sm_object, ==, sm->sm_phys->smp_object);
 		return;
 	}
 
 	if (maptype == SM_ALLOC)
-		sm->sm_phys->smp_alloc += range_tree_space(rt);
+		sm->sm_phys->smp_alloc += flat_range_tree_space(frt);
 	else
-		sm->sm_phys->smp_alloc -= range_tree_space(rt);
+		sm->sm_phys->smp_alloc -= flat_range_tree_space(frt);
 
-	expected_entries = space_map_entries(sm, rt);
+	expected_entries = space_map_entries(sm, frt);
 
 	entry_map = vmem_alloc(sm->sm_blksz, KM_SLEEP);
 	entry_map_end = entry_map + (sm->sm_blksz / sizeof (uint64_t));
@@ -281,13 +289,13 @@ space_map_write(space_map_t *sm, range_tree_t *rt, maptype_t maptype,
 	    SM_DEBUG_TXG_ENCODE(dmu_tx_get_txg(tx));
 
 	total = 0;
-	nodes = avl_numnodes(&rt->rt_root);
-	rt_space = range_tree_space(rt);
-	for (rs = avl_first(t); rs != NULL; rs = AVL_NEXT(t, rs)) {
+	nodes = flat_range_tree_nodes(frt);
+	rt_space = flat_range_tree_space(frt);
+	for (frs = flat_range_tree_seg_first(frt); frs != NULL; frs = flat_range_tree_seg_next(frt, frs)) {
 		uint64_t start;
 
-		size = (rs->rs_end - rs->rs_start) >> sm->sm_shift;
-		start = (rs->rs_start - sm->sm_start) >> sm->sm_shift;
+		size = (frs->frs_end - frs->frs_start) >> sm->sm_shift;
+		start = (frs->frs_start - sm->sm_start) >> sm->sm_shift;
 
 		total += size << sm->sm_shift;
 
@@ -297,11 +305,11 @@ space_map_write(space_map_t *sm, range_tree_t *rt, maptype_t maptype,
 			run_len = MIN(size, SM_RUN_MAX);
 
 			if (entry == entry_map_end) {
-				mutex_exit(rt->rt_lock);
+				mutex_exit(frt->frt_lock);
 				dmu_write(os, space_map_object(sm),
 				    sm->sm_phys->smp_objsize, sm->sm_blksz,
 				    entry_map, tx);
-				mutex_enter(rt->rt_lock);
+				mutex_enter(frt->frt_lock);
 				sm->sm_phys->smp_objsize += sm->sm_blksz;
 				entry = entry_map;
 			}
@@ -318,10 +326,10 @@ space_map_write(space_map_t *sm, range_tree_t *rt, maptype_t maptype,
 
 	if (entry != entry_map) {
 		size = (entry - entry_map) * sizeof (uint64_t);
-		mutex_exit(rt->rt_lock);
+		mutex_exit(frt->frt_lock);
 		dmu_write(os, space_map_object(sm), sm->sm_phys->smp_objsize,
 		    size, entry_map, tx);
-		mutex_enter(rt->rt_lock);
+		mutex_enter(frt->frt_lock);
 		sm->sm_phys->smp_objsize += size;
 	}
 	ASSERT3U(expected_entries, ==, actual_entries);
@@ -330,9 +338,9 @@ space_map_write(space_map_t *sm, range_tree_t *rt, maptype_t maptype,
 	 * Ensure that the space_map's accounting wasn't changed
 	 * while we were in the middle of writing it out.
 	 */
-	VERIFY3U(nodes, ==, avl_numnodes(&rt->rt_root));
-	VERIFY3U(range_tree_space(rt), ==, rt_space);
-	VERIFY3U(range_tree_space(rt), ==, total);
+	VERIFY3U(nodes, ==, flat_range_tree_nodes(frt));
+	VERIFY3U(flat_range_tree_space(frt), ==, rt_space);
+	VERIFY3U(flat_range_tree_space(frt), ==, total);
 
 	vmem_free(entry_map, sm->sm_blksz);
 }

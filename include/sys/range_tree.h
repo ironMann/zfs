@@ -30,6 +30,7 @@
 #ifndef _SYS_RANGE_TREE_H
 #define	_SYS_RANGE_TREE_H
 
+
 #include <sys/avl.h>
 #include <sys/dmu.h>
 
@@ -58,7 +59,7 @@ typedef struct range_tree {
 
 typedef struct range_seg {
 	avl_node_t	rs_node;	/* AVL node */
-	avl_node_t	rs_pp_node;	/* AVL picker-private node */
+	// avl_node_t	rs_pp_node;	/* AVL picker-private node */
 	uint64_t	rs_start;	/* starting offset of this segment */
 	uint64_t	rs_end;		/* ending offset (non-inclusive) */
 } range_seg_t;
@@ -75,6 +76,7 @@ typedef void range_tree_func_t(void *arg, uint64_t start, uint64_t size);
 
 void range_tree_init(void);
 void range_tree_fini(void);
+
 range_tree_t *range_tree_create(range_tree_ops_t *ops, void *arg, kmutex_t *lp);
 void range_tree_destroy(range_tree_t *rt);
 boolean_t range_tree_contains(range_tree_t *rt, uint64_t start, uint64_t size);
@@ -83,12 +85,14 @@ void range_tree_verify(range_tree_t *rt, uint64_t start, uint64_t size);
 void range_tree_swap(range_tree_t **rtsrc, range_tree_t **rtdst);
 void range_tree_stat_verify(range_tree_t *rt);
 
-void range_tree_add(void *arg, uint64_t start, uint64_t size);
-void range_tree_remove(void *arg, uint64_t start, uint64_t size);
+int range_tree_add(void *arg, uint64_t start, uint64_t size);
+int range_tree_remove(void *arg, uint64_t start, uint64_t size);
+
 void range_tree_clear(range_tree_t *rt, uint64_t start, uint64_t size);
 
 void range_tree_vacate(range_tree_t *rt, range_tree_func_t *func, void *arg);
 void range_tree_walk(range_tree_t *rt, range_tree_func_t *func, void *arg);
+
 
 #ifdef	__cplusplus
 }

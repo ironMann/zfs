@@ -33,6 +33,7 @@
 #include <sys/metaslab.h>
 #include <sys/space_map.h>
 #include <sys/range_tree.h>
+#include <sys/flat_range_tree.h>
 #include <sys/vdev.h>
 #include <sys/txg.h>
 #include <sys/avl.h>
@@ -187,7 +188,7 @@ struct metaslab_class {
 	uint64_t		mc_deferred;	/* total deferred frees */
 	uint64_t		mc_space;	/* total space (alloc + free) */
 	uint64_t		mc_dspace;	/* total deflated space */
-	uint64_t		mc_histogram[RANGE_TREE_HISTOGRAM_SIZE];
+	uint64_t		mc_histogram[FLAT_RANGE_TREE_HIST_SIZE];
 };
 
 /*
@@ -243,7 +244,7 @@ struct metaslab_group {
 	uint64_t		mg_allocations;
 	uint64_t		mg_failed_allocations;
 	uint64_t		mg_fragmentation;
-	uint64_t		mg_histogram[RANGE_TREE_HISTOGRAM_SIZE];
+	uint64_t		mg_histogram[FLAT_RANGE_TREE_HIST_SIZE];
 };
 
 /*
@@ -317,17 +318,17 @@ struct metaslab {
 	uint64_t	ms_size;
 	uint64_t	ms_fragmentation;
 
-	range_tree_t	*ms_alloctree[TXG_SIZE];
-	range_tree_t	*ms_tree;
+	flat_range_tree_t	*ms_alloctree[TXG_SIZE];
+	flat_range_tree_t	*ms_tree;
 
 	/*
 	 * The following range trees are accessed only from syncing context.
 	 * ms_free*tree only have entries while syncing, and are empty
 	 * between syncs.
 	 */
-	range_tree_t	*ms_freeingtree; /* to free this syncing txg */
-	range_tree_t	*ms_freedtree; /* already freed this syncing txg */
-	range_tree_t	*ms_defertree[TXG_DEFER_SIZE];
+	flat_range_tree_t	*ms_freeingtree; /* to free this syncing txg */
+	flat_range_tree_t	*ms_freedtree; /* already freed this syncing txg */
+	flat_range_tree_t	*ms_defertree[TXG_DEFER_SIZE];
 
 	boolean_t	ms_condensing;	/* condensing? */
 	boolean_t	ms_condense_wanted;
