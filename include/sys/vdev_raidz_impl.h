@@ -102,8 +102,8 @@ typedef struct raidz_impl_ops {
 } raidz_impl_ops_t;
 
 typedef struct raidz_col {
+	uint64_t rc_offset;		/* device offset */
 	size_t rc_devidx;		/* child device index for I/O */
-	size_t rc_offset;		/* device offset */
 	size_t rc_size;			/* I/O size */
 	abd_t *rc_abd;			/* I/O data */
 	void *rc_gdata;			/* used to store the "good" version */
@@ -113,10 +113,10 @@ typedef struct raidz_col {
 } raidz_col_t;
 
 typedef struct raidz_map {
+	uint64_t rm_asize;		/* Actual total I/O size */
 	size_t rm_cols;			/* Regular column count */
 	size_t rm_scols;		/* Count including skipped columns */
 	size_t rm_bigcols;		/* Number of oversized columns */
-	size_t rm_asize;		/* Actual total I/O size */
 	size_t rm_missingdata;		/* Count of missing data devices */
 	size_t rm_missingparity;	/* Count of missing parity devices */
 	size_t rm_firstdatacol;		/* First data column/parity count */

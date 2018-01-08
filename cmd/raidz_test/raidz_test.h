@@ -42,8 +42,8 @@ static const char *raidz_impl_names[] = {
 };
 
 typedef struct raidz_test_opts {
+	uint64_t rto_offset;
 	size_t rto_ashift;
-	size_t rto_offset;
 	size_t rto_dcols;
 	size_t rto_dsize;
 	size_t rto_v;
