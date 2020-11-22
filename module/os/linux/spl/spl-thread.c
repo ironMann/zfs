@@ -119,8 +119,14 @@ __thread_create(caddr_t stk, size_t  stksize, thread_func_t func,
 
 	tsk = spl_kthread_create(thread_generic_wrapper, (void *)tp,
 	    "%s", tp->tp_name);
-	if (IS_ERR(tsk))
+	if (!tsk || IS_ERR(tsk)) {
+		printk(KERN_WARNING "spl_kthread_create failed: name=%s, ret=%p\n",
+		    tp->tp_name, tsk);
+
+		kmem_free(tp->tp_name, tp->tp_name_size);
+		kmem_free(tp, sizeof (thread_priv_t));
 		return (NULL);
+	}
 
 	wake_up_process(tsk);
 	return ((kthread_t *)tsk);
