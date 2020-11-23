@@ -121,13 +121,19 @@ struct send_thread_arg {
 	uint64_t	fromtxg;	/* Traverse from this txg */
 	int		flags;		/* flags to pass to traverse_dataset */
 	int		error_code;
-	boolean_t	cancel;
+	kmutex_t		lock;
+	kcondvar_t		cv;
+	boolean_t		cancel;
+	boolean_t		running;
 	zbookmark_phys_t resume;
 	uint64_t	*num_blocks_visited;
 };
 
 struct redact_list_thread_arg {
+	kmutex_t		lock;
+	kcondvar_t		cv;
 	boolean_t		cancel;
+	boolean_t		running;
 	bqueue_t		q;
 	zbookmark_phys_t	resume;
 	redaction_list_t	*rl;
@@ -143,7 +149,22 @@ struct send_merge_thread_arg {
 	struct send_thread_arg		*to_arg;
 	struct redact_list_thread_arg	*redact_arg;
 	int				error;
-	boolean_t			cancel;
+	kmutex_t		lock;
+	kcondvar_t		cv;
+	boolean_t		cancel;
+	boolean_t		running;
+};
+
+struct send_reader_thread_arg {
+	struct send_merge_thread_arg *smta;
+	bqueue_t 		q;
+	kmutex_t		lock;
+	kcondvar_t		cv;
+	boolean_t		cancel;
+	boolean_t		running;
+	boolean_t		issue_reads;
+	uint64_t 		featureflags;
+	int error;
 };
 
 struct send_range {
@@ -1232,6 +1253,10 @@ send_traverse_thread(void *arg)
 	struct send_range *data;
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 
+	mutex_enter(&st_arg->lock);
+	st_arg->running = B_TRUE;
+	mutex_exit(&st_arg->lock);
+
 	err = traverse_dataset_resume(st_arg->os->os_dsl_dataset,
 	    st_arg->fromtxg, &st_arg->resume,
 	    st_arg->flags, send_cb, st_arg);
@@ -1241,6 +1266,11 @@ send_traverse_thread(void *arg)
 	data = range_alloc(DATA, 0, 0, 0, B_TRUE);
 	bqueue_enqueue_flush(&st_arg->q, data, sizeof (*data));
 	spl_fstrans_unmark(cookie);
+
+	mutex_enter(&st_arg->lock);
+	st_arg->running = B_FALSE;
+	mutex_exit(&st_arg->lock);
+	cv_broadcast(&st_arg->cv);
 	thread_exit();
 }
 
@@ -1320,6 +1350,11 @@ redact_list_thread(void *arg)
 	struct redact_list_thread_arg *rlt_arg = arg;
 	struct send_range *record;
 	fstrans_cookie_t cookie = spl_fstrans_mark();
+
+	mutex_enter(&rlt_arg->lock);
+	rlt_arg->running = B_TRUE;
+	mutex_exit(&rlt_arg->lock);
+
 	if (rlt_arg->rl != NULL) {
 		struct redact_list_cb_arg rlcba = {0};
 		rlcba.cancel = &rlt_arg->cancel;
@@ -1335,6 +1370,10 @@ redact_list_thread(void *arg)
 	bqueue_enqueue_flush(&rlt_arg->q, record, sizeof (*record));
 	spl_fstrans_unmark(cookie);
 
+	mutex_enter(&rlt_arg->lock);
+	rlt_arg->running = B_FALSE;
+	mutex_exit(&rlt_arg->lock);
+	cv_broadcast(&rlt_arg->cv);
 	thread_exit();
 }
 
@@ -1518,6 +1557,10 @@ send_merge_thread(void *arg)
 	int err = 0;
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 
+	mutex_enter(&smt_arg->lock);
+	smt_arg->running = B_TRUE;
+	mutex_exit(&smt_arg->lock);
+
 	if (smt_arg->redact_arg == NULL) {
 		front_ranges[REDACT_IDX] =
 		    kmem_zalloc(sizeof (struct send_range), KM_SLEEP);
@@ -1581,17 +1624,13 @@ send_merge_thread(void *arg)
 	range->eos_marker = B_TRUE;
 	bqueue_enqueue_flush(&smt_arg->q, range, 1);
 	spl_fstrans_unmark(cookie);
+
+	mutex_enter(&smt_arg->lock);
+	smt_arg->running = B_FALSE;
+	mutex_exit(&smt_arg->lock);
+	cv_broadcast(&smt_arg->cv);
 	thread_exit();
 }
-
-struct send_reader_thread_arg {
-	struct send_merge_thread_arg *smta;
-	bqueue_t q;
-	boolean_t cancel;
-	boolean_t issue_reads;
-	uint64_t featureflags;
-	int error;
-};
 
 static void
 dmu_send_read_done(zio_t *zio)
@@ -1740,6 +1779,11 @@ send_reader_thread(void *arg)
 	bqueue_t *outq = &srta->q;
 	objset_t *os = smta->os;
 	fstrans_cookie_t cookie = spl_fstrans_mark();
+
+	mutex_enter(&srta->lock);
+	srta->running = B_TRUE;
+	mutex_exit(&srta->lock);
+
 	struct send_range *range = bqueue_dequeue(inq);
 	int err = 0;
 
@@ -1893,6 +1937,11 @@ send_reader_thread(void *arg)
 
 	bqueue_enqueue_flush(outq, range, 1);
 	spl_fstrans_unmark(cookie);
+
+	mutex_enter(&srta->lock);
+	srta->running = B_FALSE;
+	mutex_exit(&srta->lock);
+	cv_broadcast(&srta->cv);
 	thread_exit();
 }
 
@@ -2040,7 +2089,7 @@ create_begin_record(struct dmu_send_params *dspp, objset_t *os,
 	return (drr);
 }
 
-static void
+static boolean_t
 setup_to_thread(struct send_thread_arg *to_arg, objset_t *to_os,
     dmu_sendstatus_t *dssp, uint64_t fromtxg, boolean_t rawok)
 {
@@ -2048,26 +2097,32 @@ setup_to_thread(struct send_thread_arg *to_arg, objset_t *to_os,
 	    MAX(zfs_send_no_prefetch_queue_length, 2 * zfs_max_recordsize),
 	    offsetof(struct send_range, ln)));
 	to_arg->error_code = 0;
+	mutex_init(&to_arg->lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&to_arg->cv, NULL, CV_DEFAULT, NULL);
 	to_arg->cancel = B_FALSE;
+	to_arg->running = B_FALSE;
 	to_arg->os = to_os;
 	to_arg->fromtxg = fromtxg;
 	to_arg->flags = TRAVERSE_PRE | TRAVERSE_PREFETCH_METADATA;
 	if (rawok)
 		to_arg->flags |= TRAVERSE_NO_DECRYPT;
 	to_arg->num_blocks_visited = &dssp->dss_blocks;
-	(void) thread_create(NULL, 0, send_traverse_thread, to_arg, 0,
-	    curproc, TS_RUN, minclsyspri);
+	return (NULL != thread_create(NULL, 0, send_traverse_thread, to_arg, 0,
+	    curproc, TS_RUN, minclsyspri));
 }
 
-static void
+static boolean_t
 setup_from_thread(struct redact_list_thread_arg *from_arg,
     redaction_list_t *from_rl, dmu_sendstatus_t *dssp)
 {
 	VERIFY0(bqueue_init(&from_arg->q, zfs_send_no_prefetch_queue_ff,
 	    MAX(zfs_send_no_prefetch_queue_length, 2 * zfs_max_recordsize),
 	    offsetof(struct send_range, ln)));
+	mutex_init(&from_arg->lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&from_arg->cv, NULL, CV_DEFAULT, NULL);
 	from_arg->error_code = 0;
 	from_arg->cancel = B_FALSE;
+	from_arg->running = B_FALSE;
 	from_arg->rl = from_rl;
 	from_arg->mark_redact = B_FALSE;
 	from_arg->num_blocks_visited = &dssp->dss_blocks;
@@ -2075,18 +2130,20 @@ setup_from_thread(struct redact_list_thread_arg *from_arg,
 	 * If from_ds is null, send_traverse_thread just returns success and
 	 * enqueues an eos marker.
 	 */
-	(void) thread_create(NULL, 0, redact_list_thread, from_arg, 0,
-	    curproc, TS_RUN, minclsyspri);
+	return (NULL != thread_create(NULL, 0, redact_list_thread, from_arg, 0,
+	    curproc, TS_RUN, minclsyspri));
 }
 
-static void
+static boolean_t
 setup_redact_list_thread(struct redact_list_thread_arg *rlt_arg,
     struct dmu_send_params *dspp, redaction_list_t *rl, dmu_sendstatus_t *dssp)
 {
 	if (dspp->redactbook == NULL)
-		return;
-
+		return B_TRUE;
+	mutex_init(&rlt_arg->lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&rlt_arg->cv, NULL, CV_DEFAULT, NULL);
 	rlt_arg->cancel = B_FALSE;
+	rlt_arg->running = B_FALSE;
 	VERIFY0(bqueue_init(&rlt_arg->q, zfs_send_no_prefetch_queue_ff,
 	    MAX(zfs_send_no_prefetch_queue_length, 2 * zfs_max_recordsize),
 	    offsetof(struct send_range, ln)));
@@ -2095,11 +2152,11 @@ setup_redact_list_thread(struct redact_list_thread_arg *rlt_arg,
 	rlt_arg->rl = rl;
 	rlt_arg->num_blocks_visited = &dssp->dss_blocks;
 
-	(void) thread_create(NULL, 0, redact_list_thread, rlt_arg, 0,
-	    curproc, TS_RUN, minclsyspri);
+	return (NULL != thread_create(NULL, 0, redact_list_thread, rlt_arg, 0,
+	    curproc, TS_RUN, minclsyspri));
 }
 
-static void
+static boolean_t
 setup_merge_thread(struct send_merge_thread_arg *smt_arg,
     struct dmu_send_params *dspp, struct redact_list_thread_arg *from_arg,
     struct send_thread_arg *to_arg, struct redact_list_thread_arg *rlt_arg,
@@ -2108,7 +2165,10 @@ setup_merge_thread(struct send_merge_thread_arg *smt_arg,
 	VERIFY0(bqueue_init(&smt_arg->q, zfs_send_no_prefetch_queue_ff,
 	    MAX(zfs_send_no_prefetch_queue_length, 2 * zfs_max_recordsize),
 	    offsetof(struct send_range, ln)));
+	mutex_init(&smt_arg->lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&smt_arg->cv, NULL, CV_DEFAULT, NULL);
 	smt_arg->cancel = B_FALSE;
+	smt_arg->running = B_FALSE;
 	smt_arg->error = 0;
 	smt_arg->from_arg = from_arg;
 	smt_arg->to_arg = to_arg;
@@ -2116,11 +2176,11 @@ setup_merge_thread(struct send_merge_thread_arg *smt_arg,
 		smt_arg->redact_arg = rlt_arg;
 
 	smt_arg->os = os;
-	(void) thread_create(NULL, 0, send_merge_thread, smt_arg, 0, curproc,
-	    TS_RUN, minclsyspri);
+	return ( NULL != thread_create(NULL, 0, send_merge_thread, smt_arg, 0, curproc,
+	    TS_RUN, minclsyspri));
 }
 
-static void
+static boolean_t
 setup_reader_thread(struct send_reader_thread_arg *srt_arg,
     struct dmu_send_params *dspp, struct send_merge_thread_arg *smt_arg,
     uint64_t featureflags)
@@ -2128,11 +2188,42 @@ setup_reader_thread(struct send_reader_thread_arg *srt_arg,
 	VERIFY0(bqueue_init(&srt_arg->q, zfs_send_queue_ff,
 	    MAX(zfs_send_queue_length, 2 * zfs_max_recordsize),
 	    offsetof(struct send_range, ln)));
+	mutex_init(&srt_arg->lock, NULL, MUTEX_DEFAULT, NULL);
+	cv_init(&srt_arg->cv, NULL, CV_DEFAULT, NULL);
+	srt_arg->cancel = B_FALSE;
+	srt_arg->running = B_FALSE;
 	srt_arg->smta = smt_arg;
 	srt_arg->issue_reads = !dspp->dso->dso_dryrun;
 	srt_arg->featureflags = featureflags;
-	(void) thread_create(NULL, 0, send_reader_thread, srt_arg, 0,
-	    curproc, TS_RUN, minclsyspri);
+	return (NULL != thread_create(NULL, 0, send_reader_thread, srt_arg, 0,
+	    curproc, TS_RUN, minclsyspri));
+}
+
+static void
+join_queue_thread(boolean_t *cancel, boolean_t *running, kmutex_t *lock,
+	kcondvar_t *cv, bqueue_t *q) {
+	struct send_range *range;
+
+	// signal the thread to cancel and wait
+	mutex_enter(lock);
+	*cancel = B_TRUE;
+
+	while (*running) {
+		cv_wait(cv, lock);
+	}
+	mutex_exit(lock);
+
+	mutex_destroy(lock);
+	cv_destroy(cv);
+
+	if (q) {
+		while (!bqueue_empty(q)) {
+			range = bqueue_dequeue(q);
+			if (range)
+				range_free(range);
+		}
+		bqueue_destroy(q);
+	}
 }
 
 static int
@@ -2524,11 +2615,14 @@ dmu_send_impl(struct dmu_send_params *dspp)
 		goto out;
 	}
 
-	setup_to_thread(to_arg, os, dssp, fromtxg, dspp->rawok);
-	setup_from_thread(from_arg, from_rl, dssp);
-	setup_redact_list_thread(rlt_arg, dspp, redact_rl, dssp);
-	setup_merge_thread(smt_arg, dspp, from_arg, to_arg, rlt_arg, os);
-	setup_reader_thread(srt_arg, dspp, smt_arg, featureflags);
+	if (! (setup_to_thread(to_arg, os, dssp, fromtxg, dspp->rawok) &&
+		setup_from_thread(from_arg, from_rl, dssp) &&
+		setup_redact_list_thread(rlt_arg, dspp, redact_rl, dssp) &&
+		setup_merge_thread(smt_arg, dspp, from_arg, to_arg, rlt_arg, os) &&
+		setup_reader_thread(srt_arg, dspp, smt_arg, featureflags)) ) {
+		err = SET_ERROR(EINTR);
+		goto out_join;
+	}
 
 	range = bqueue_dequeue(&srt_arg->q);
 	while (err == 0 && !range->eos_marker) {
@@ -2552,12 +2646,13 @@ dmu_send_impl(struct dmu_send_params *dspp)
 	}
 	range_free(range);
 
-	bqueue_destroy(&srt_arg->q);
-	bqueue_destroy(&smt_arg->q);
+out_join:
+	join_queue_thread(&srt_arg->cancel, &srt_arg->running, &srt_arg->lock, &srt_arg->cv, &srt_arg->q);
+	join_queue_thread(&smt_arg->cancel, &smt_arg->running, &smt_arg->lock, &smt_arg->cv, &smt_arg->q);
 	if (dspp->redactbook != NULL)
-		bqueue_destroy(&rlt_arg->q);
-	bqueue_destroy(&to_arg->q);
-	bqueue_destroy(&from_arg->q);
+		join_queue_thread(&rlt_arg->cancel, &rlt_arg->running, &rlt_arg->lock, &rlt_arg->cv, &rlt_arg->q);
+	join_queue_thread(&to_arg->cancel, &to_arg->running, &to_arg->lock, &to_arg->cv, &to_arg->q);
+	join_queue_thread(&from_arg->cancel, &from_arg->running, &from_arg->lock, &from_arg->cv, &from_arg->q);
 
 	if (err == 0 && srt_arg->error != 0)
 		err = srt_arg->error;
